@@ -1,5 +1,9 @@
 # \<EOS\> Prediction Test
 
-> WANTED!
+@`SleepyLGod` for current observation 📂 /cur
+@`lysun0` for previous evaluation 📂 /pre
 
-Deadline：6th Dec, 2024
+## Developing Rules
+
+- 2 branchs: `cur` and `pre`
+- @lysun0 will evaluate the `pre` branch, and @SleepyLGod will evaluate the `cur` branch
