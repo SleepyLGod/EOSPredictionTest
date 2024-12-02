@@ -1,6 +1,7 @@
-# \<EOS\> Prediction Test
+# \<EoS\> Prediction Test
 
 @`SleepyLGod` for current observation 📂 /cur
+
 @`lysun0` for previous evaluation 📂 /pre
 
 ## Developing Rules
