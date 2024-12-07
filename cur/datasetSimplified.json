@@ -1,16 +1,36 @@
 {
     "qa_pairs": [
     {
-        "prompt": "Can you tell me the capital of France?",
+        "prompt": "Can you tell me the capital of France?, use no more than 100 words to explain.",
         "answer": "The capital of France is Paris. Paris is known for its rich history, culture, and landmarks such as the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum. It is also a major center for art, fashion, and gastronomy. The city is situated on the River Seine and has been a significant settlement for more than two millennia."
     },
     {
-        "prompt": "Explain how photosynthesis operates.",
+        "prompt": "Explain how photosynthesis operates, use no more than 100 words to explain.",
         "answer": "Photosynthesis is the process by which green plants, algae, and some bacteria convert light energy into chemical energy stored in glucose. It occurs in the chloroplasts of plant cells, where chlorophyll captures light energy. This energy is used to convert carbon dioxide from the air and water from the soil into glucose and oxygen. The overall equation for photosynthesis is: 6 CO2 + 6 H2O + light energy -> C6H12O6 + 6 O2. This process is essential for the production of oxygen and as the foundation of the food chain."
     },
     {
-        "prompt": "Describe the theory of relativity.",
+        "prompt": "Describe the theory of relativity, use no more than 100 words to explain.",
         "answer": "The theory of relativity, developed by Albert Einstein, consists of two main parts: special relativity and general relativity. Special relativity, published in 1905, deals with the physics of objects moving at constant speeds, particularly those close to the speed of light. It introduced the famous equation E=mc^2, which shows the relationship between mass and energy. General relativity, published in 1915, extends these concepts to include gravity, describing it as the curvature of spacetime caused by mass and energy. This theory has been confirmed by numerous experiments and observations, and it has significant implications for our understanding of the universe, including the behavior of black holes and the expansion of the cosmos."
+    },
+    {
+        "prompt": "What city serves as the capital of the United States, use no more than 100 words to explain.",
+        "answer": "The capital of the United States is Washington, D.C. Washington, D.C. is a federal district located on the east coast of the country along the Potomac River. It was established as the capital in 1790 and is home to the three branches of the U.S. government: the executive, legislative, and judicial branches. The city is known for its iconic landmarks, including the White House, the U.S. Capitol, and the Washington Monument. It is also a center for politics, diplomacy, and culture."
+    },
+    {
+        "prompt": "How does mitosis occur?, use no more than 100 words to explain.",
+        "answer": "Mitosis is the process by which a eukaryotic cell divides to produce two identical daughter cells. It consists of several stages: prophase, metaphase, anaphase, and telophase. During prophase, the chromatin condenses into chromosomes, the nuclear envelope breaks down, and the spindle apparatus forms. In metaphase, the chromosomes line up at the center of the cell. In anaphase, the sister chromatids separate and move to opposite poles. Finally, in telophase, the nuclear envelope reforms, the chromosomes decondense, and the cell divides in a process called cytokinesis. Mitosis is essential for growth, development, and repair in multicellular organisms."
+    },
+    {
+        "prompt": "What constitutes the structure of an atom? use no more than 100 words to explain.",
+        "answer": "An atom consists of three main components: protons, neutrons, and electrons. Protons and neutrons are located in the nucleus at the center of the atom, while electrons orbit the nucleus in electron shells. Protons have a positive charge, neutrons have no charge, and electrons have a negative charge. The number of protons in an atom determines its atomic number, which defines the element. The number of protons and neutrons together determines the atomic mass. Atoms are the building blocks of matter and combine to form molecules and compounds through chemical bonds."
+    },
+    {
+        "prompt": "What are the layers of the Earth? use no more than 100 words to explain.",
+        "answer": "The Earth is composed of several layers: the inner core, outer core, mantle, and crust. The inner core is a solid sphere of iron and nickel at the center of the planet. The outer core is a liquid layer of molten iron and nickel surrounding the inner core. The mantle is a semi-solid layer of rock that lies between the outer core and the crust. The crust is the outermost layer of the Earth and is divided into tectonic plates that float on the semi-fluid mantle. These plates move and interact, leading to geological processes such as earthquakes, volcanoes, and mountain formation."
+    },
+    {
+        "prompt": "How does cellular respiration function? use no more than 100 words to explain.",
+        "answer": "Cellular respiration is the process by which cells convert glucose and oxygen into energy, carbon dioxide, and water. It occurs in the mitochondria of eukaryotic cells and consists of three main stages: glycolysis, the citric acid cycle, and oxidative phosphorylation. In glycolysis, glucose is broken down into pyruvate, producing a small amount of ATP. The citric acid cycle further breaks down pyruvate, generating more ATP and electron carriers. Finally, oxidative phosphorylation uses these electron carriers to produce a large amount of ATP through the electron transport chain. Cellular respiration is essential for the production of energy in the form of ATP, which powers cellular processes and activities."
     }
     ]
 }
