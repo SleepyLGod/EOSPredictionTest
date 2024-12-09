@@ -1,7 +1,7 @@
 {
     "qa_pairs": [
     {
-        "prompt": "Can you tell me the capital of France?, use no more than 100 words to explain.",
+        "prompt": "Can you tell me what is the capital of France?, use no more than 100 words to explain.",
         "answer": "The capital of France is Paris. Paris is known for its rich history, culture, and landmarks such as the Eiffel Tower, Notre-Dame Cathedral, and the Louvre Museum. It is also a major center for art, fashion, and gastronomy. The city is situated on the River Seine and has been a significant settlement for more than two millennia."
     },
     {
