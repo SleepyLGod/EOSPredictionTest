@@ -38,5 +38,16 @@ Heads and layers are the two **main hyperparameters** of the attention mechanism
 
 ### Rough Observations
 
+> **Experimental settings**:
+>
+> - Llama-3.2-8b Model
+> - Alpaca Dataset (QA tasks chosen)
+>
+> **Current defects**:
+>
+> - The model has not been fine-tuned, so it will generate a short answer and repeat it, and will not generate an *end_of_sequence* token.
+> - After improvements such as adding *top-k sampling*, *temperature mechanism*, and *repetition penalty*, the generation length has been limited, but the coherence and accuracy of the answer are not high, and fine-tuning is still needed to obtain a more accurate end_of_sequence token.
+
 1. No matter what the number of layer/head is, for one particular $Q_i{K_{1\rightarrow{i}}}^T$ vector, the hightest score is often from $Q_i{K_{j\rightarrow{i}}}^T$ chunks, where $j$ is close to $i$. Of course, there are some exceptions that: *the attention scores are distributed to all the tokens in the input sequence*, **or** *one token has a high score to all the tokens in the input sequence*. But the former is more common.
-2. Maybe the statistics in the Meta's layer skip paper is wrong... (or owing to utilizing different models and datasets), the attention scores of the last layers are not always non-neccessary, instead, sometimes, the last few layers still have a big impact on the final output. (I think it's because of the fine-tuning process, the model is more likely to focus on the last few layers to get the raw data?) **$\rightarrow$ Need future search**
+2. The same observation as the meta's layer-skip paper, the attention scores of the last few layers is really low enough to be ignored.
+3. From the start of the decoding phase to the generation of the 'end_of_sequence' token: seems no such trend?
