@@ -1,7 +1,7 @@
 import os
 from PIL import Image
 
-prompt_num = 10
+prompt_num = 3
 
 folder_path = f'./images/maps_final/prompt_full_s_{prompt_num}/'
 output_path = f'./images/maps_final/{prompt_num}_combined_heatmaps.png'

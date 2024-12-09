@@ -1,2 +1,5 @@
 images/
-attention_scores/
+.attention_scores/
+.output/
+.venv/
+```
