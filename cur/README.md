@@ -9,6 +9,7 @@
 python3 -m venv .env
 source .env/bin/activate
 pip install -r requirements.txt
+# install your own torch version
 ```
 
 ## Obersevations

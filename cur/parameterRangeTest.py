@@ -8,11 +8,19 @@ from torch.nn import functional as F
 
 utils.logging.set_verbosity_error()  # Suppress standard warnings
 # Load tokenizer and model
-models = ['meta-llama/Llama-3.2-1B', 
+models = [
+        'meta-llama/Llama-3.2-1B', # Llama-3.2-1B
+        'meta-llama/Meta-Llama-3-8B', # Meta-Llama-3-8B
+        'meta-llama/Meta-Llama-3-70B', # Meta-Llama-3-70B
+        'meta-llama/Meta-Llama-3-8B-Instruct', # Meta-Llama-3-8B-Instruct
+        'EleutherAI/gpt-j-6', # GPT-J 
+        'meta-llama/Llama-2-13b', # Llama-2
+        'EleutherAI/gpt-neox-20b', # GPT-NeoX
         ]
 model_name = models[0]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager").to(device)
 
 # Parameters
 eos_token_id = tokenizer.eos_token_id
@@ -20,16 +28,26 @@ eos_token_id = tokenizer.eos_token_id
 # Load the dataset
 # alpaca dataset
 # with open('./data/dataset_alpaca.json', 'r') as f:
-with open('./data/datasetSimplified_alpaca.json.json', 'r') as f:
+with open('./data/datasetSimplified_alpaca.json', 'r') as f:
     data = json.load(f)
 prompt_id = 3
 prompt = data['qa_pairs'][prompt_id]['prompt']
+
+# Create directory to store attention scores
+scores_dir = f'./.attention_scores/prompt_full_{prompt_id}/'
+os.makedirs(scores_dir, exist_ok=True)
+
+print(f"Prompt: {prompt}")
 
 # Tokenize the prompt
 inputs = tokenizer(prompt, return_tensors='pt')
 input_ids = inputs.input_ids
 attention_mask = inputs.attention_mask
 input_len = input_ids.shape[1]
+
+print(f"Input length: {input_len}")
+# print(f"Input tokens: {tokenizer.decode(input_ids[0], skip_special_tokens=True)}")
+print(f"Attention mask: {attention_mask}")
 
 # other parameters
 
@@ -54,7 +72,7 @@ def generate_and_record(varying_param_name, varying_param_values, fixed_params, 
         attention_mask = initial_attention_mask.clone()
         generated_tokens = []
         step = 0
-        max_new_tokens = 300
+        max_new_tokens = 400
         while step < max_new_tokens:
             outputs = model(input_ids, attention_mask=attention_mask)
             logits = outputs.logits[:, -1, :]
@@ -88,16 +106,19 @@ def generate_and_record(varying_param_name, varying_param_values, fixed_params, 
         output_lengths.append(total_tokens)
         
         # Save to .txt file
+        os.makedirs(os.path.dirname(f'.output/{output_prefix}_params_{param_value}.txt'), exist_ok=True)
         with open(f'.output/{output_prefix}_params_{param_value}.txt', 'w') as f:
             f.write(f"Parameters: {current_params}\n")
             f.write(f"Generated output: {generated_text}\n")
             f.write(f"Total tokens generated: {total_tokens}\n\n")
-    
+        print(f"Tested {varying_param_name} = {param_value}, generated {total_tokens} tokens")
+
     # Plot and save graph
     plt.figure()
     plt.plot(varying_param_values, output_lengths, marker='o')
     plt.xlabel(varying_param_name)
     plt.ylabel('output_length')
+    print(f"Tested {varying_param_name} = {param_value}, generated {total_tokens} tokens")
     plt.title(f'output_length & {varying_param_name} for prompt {prompt_id}')
     plt.grid(True)
     plt.savefig(f'.output/{output_prefix}_graph.png')
