@@ -20,6 +20,7 @@ models = [
 model_name = models[0]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager").to(device)
 
 # Parameters
