@@ -9,10 +9,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, utils
 utils.logging.set_verbosity_error()  # Suppress standard warnings
 # Load tokenizer and model
 models = [
-        'meta-llama/Llama-3.2-1B', # Llama-3.2-1B
+        'meta-llama/Llama-3.2-1B', # Llama-3.2-1B (16 layers 32 heads)
         'meta-llama/Meta-Llama-3-8B', # Meta-Llama-3-8B
         'meta-llama/Meta-Llama-3-70B', # Meta-Llama-3-70B
-        'meta-llama/Meta-Llama-3-8B-Instruct', # Meta-Llama-3-8B-Instruct
+        'meta-llama/Meta-Llama-3-8B-Instruct', # Meta-Llama-3-8B-Instruct (the only model TRAIL tests with)
         'EleutherAI/gpt-j-6', # GPT-J 
         'meta-llama/Llama-2-13b', # Llama-2
         'EleutherAI/gpt-neox-20b', # GPT-NeoX
@@ -25,13 +25,16 @@ model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="ea
 
 # Parameters
 eos_token_id = tokenizer.eos_token_id
+eos_flag=0
 
 # Load the dataset
 # alpaca dataset
 # with open('./data/dataset_alpaca.json', 'r') as f:
-with open('./data/datasetSimplified_alpaca.json', 'r') as f:
+# with open('./data/datasetSimplified_alpaca.json', 'r') as f:
+with open('./data/dataset_lmsys-chat-1m.json', 'r') as f:
     data = json.load(f)
-prompt_id = 3
+
+prompt_id = 0
 prompt = data['qa_pairs'][prompt_id]['prompt']
 
 # Tokenize the prompt
@@ -80,6 +83,8 @@ def sample_top_k(logits, k, temperature):
 step = 0
 while step < max_new_tokens:
     with torch.no_grad():
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
         outputs = model(input_ids, attention_mask=attention_mask, output_attentions=True)
     logits = outputs.logits[:, -1, :]
     
@@ -91,7 +96,10 @@ while step < max_new_tokens:
     next_token = sample_top_k(logits, k=top_k, temperature=temperature)
     
     if next_token.item() == eos_token_id:
+        eos_flag=1
+        print("********************************")
         print("Generation ended with EOS token.")
+        print("********************************")
         break
     
     # Avoid immediate repetitive tokens
@@ -111,17 +119,16 @@ while step < max_new_tokens:
     
     # Append the next token to input_ids and attention_mask
     input_ids = torch.cat([input_ids, next_token.view(1, 1)], dim=1)
-    attention_mask = torch.cat([attention_mask, torch.ones(1, 1)], dim=1)
+    attention_mask = torch.cat([attention_mask, torch.ones(1, 1).to(device)], dim=1)
     generated_tokens.append(next_token.item())
     step += 1
 
+
+
 # Calculate the total number of tokens generated
 total_tokens = len(generated_tokens)
-print(f"Total tokens generated: {total_tokens}")
-
 # Decode and print the generated output
 generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-print(f"Generated output: {generated_text}")
 
 # Ensure the output directory exists for plots
 output_dir = f'./images/maps_final/prompt_full_s_{prompt_id}/'
@@ -133,6 +140,8 @@ with open(txt_file_path, 'w') as f:
     f.write(f"Prompt: {prompt}\n")
     f.write(f"Generated output: {generated_text}\n")
     f.write(f"Total tokens generated: {total_tokens}\n")
+    if eos_flag==1:
+        f.write("Generation ended with EOS token.")
 
 # Plotting attention scores as heatmaps
 for (layer_idx, head_idx), scores_list in attention_scores_all.items():
@@ -160,10 +169,16 @@ for (layer_idx, head_idx), scores_list in attention_scores_all.items():
     plt.colorbar(label='Attention Score')
     
     # Set ticks at intervals
-    x_ticks = np.arange(0, heatmap_data_normalized.shape[1], max(1, total_tokens // 20))
-    y_ticks = np.arange(0, heatmap_data_normalized.shape[0], max(1, total_tokens // 20))
-    plt.xticks(ticks=x_ticks, labels=x_ticks + 1)
-    plt.yticks(ticks=y_ticks, labels=y_ticks + 1)
+    x_ticks = np.arange(0, heatmap_data_normalized.shape[1], max(1, total_tokens // 50))
+    y_ticks = np.arange(0, heatmap_data_normalized.shape[0], max(1, total_tokens // 50))
+    '''
+    if x_ticks[-1] != heatmap_data_normalized.shape[1]-1:
+        x_ticks = np.append(x_ticks, heatmap_data_normalized.shape[1]-1)
+    if y_ticks[-1] != heatmap_data_normalized.shape[0]-1:
+        y_ticks = np.append(y_ticks, heatmap_data_normalized.shape[0]-1)
+    '''
+    plt.xticks(ticks=x_ticks, labels=x_ticks + 1, fontsize=6)
+    plt.yticks(ticks=y_ticks, labels=y_ticks + 1, fontsize=6)
     
     # Save the plot
     plt.savefig(f'{output_dir}heatmap_layer_{layer_idx}_head_{head_idx}.png', bbox_inches='tight')
