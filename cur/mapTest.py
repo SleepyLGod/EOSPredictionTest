@@ -17,7 +17,13 @@ models = [
         'meta-llama/Llama-2-13b', # Llama-2
         'EleutherAI/gpt-neox-20b', # GPT-NeoX
         ]
-model_name = models[0]
+
+print("Choose the model to test:\n 1. Llama-3.2-1B\n 2. Meta-Llama-3-8B\n 3. Meta-Llama-3-70B\n 4. Meta-Llama-3-8B-Instruct\n 5. GPT-J\n 6. Llama-2\n 7. GPT-NeoX")
+model_choice = int(input("Enter the number corresponding to the model: "))
+if model_choice < 1 or model_choice > len(models):
+    raise ValueError("Invalid model choice. Please enter a number between 1 and 7.")
+model_name = models[model_choice - 1]
+
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
@@ -31,10 +37,25 @@ eos_flag=0
 # alpaca dataset
 # with open('./data/dataset_alpaca.json', 'r') as f:
 # with open('./data/datasetSimplified_alpaca.json', 'r') as f:
-with open('./data/dataset_lmsys-chat-1m.json', 'r') as f:
+datasets = {
+    1: './data/dataset_alpaca.json',
+    2: './data/datasetSimplified_alpaca.json',
+    3: './data/dataset_lmsys-chat-1m.json'
+}
+
+print("Choose the dataset to use:\n 1. Alpaca\n 2. Simplified Alpaca\n 3. LMSYS Chat 1M")
+dataset_choice = int(input("Enter the number corresponding to the dataset: "))
+if dataset_choice < 1 or dataset_choice > len(datasets):
+    raise ValueError("Invalid dataset choice. Please enter a number between 1 and 3.")
+dataset_path = datasets[dataset_choice]
+
+with open(dataset_path, 'r') as f:
     data = json.load(f)
 
-prompt_id = 0
+prompt_id = int(input(f"Enter the prompt ID (0 to {len(data['qa_pairs']) - 1}): "))
+if prompt_id < 0 or prompt_id >= len(data['qa_pairs']):
+    raise ValueError(f"Invalid prompt ID. Please enter a number between 0 and {len(data['qa_pairs']) - 1}.")
+
 prompt = data['qa_pairs'][prompt_id]['prompt']
 
 # Tokenize the prompt
@@ -131,7 +152,7 @@ total_tokens = len(generated_tokens)
 generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 # Ensure the output directory exists for plots
-output_dir = f'./images/maps_final/prompt_full_s_{prompt_id}/'
+output_dir = f'./images/maps_final/{model_name}_{dataset_choice}_prompt_{prompt_id}/'
 os.makedirs(output_dir, exist_ok=True)
 
 # Create a .txt file to save the prompt, generated output, and output length info
