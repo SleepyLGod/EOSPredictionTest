@@ -27,7 +27,7 @@ model_name = models[model_choice - 1]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
-model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager").to(device)
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="/research/d2/gds/hdlu24/cache_model", attn_implementation="eager").to(device)
 
 # Parameters
 eos_token_id = tokenizer.eos_token_id
