@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 from torch.nn import functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM, utils
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
+
 utils.logging.set_verbosity_error()  # Suppress standard warnings
 # Load tokenizer and model
 models = [
@@ -13,8 +15,8 @@ models = [
         'meta-llama/Meta-Llama-3-8B', # Meta-Llama-3-8B
         'meta-llama/Meta-Llama-3-70B', # Meta-Llama-3-70B
         'meta-llama/Meta-Llama-3-8B-Instruct', # Meta-Llama-3-8B-Instruct (the only model TRAIL tests with)
-        'EleutherAI/gpt-j-6', # GPT-J 
-        'meta-llama/Llama-2-13b', # Llama-2
+        'EleutherAI/gpt-j-6b', # GPT-J 
+        'meta-llama/Llama-2-13b-chat-hf', # Llama-2, fine-tuned
         'EleutherAI/gpt-neox-20b', # GPT-NeoX
         ]
 
@@ -27,7 +29,8 @@ model_name = models[model_choice - 1]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
-model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="/research/d2/gds/hdlu24/cache_model", attn_implementation="eager").to(device)
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="/research/d2/gds/hdlu24/cache_model", device_map="auto", attn_implementation="eager")
+# model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="/research/d2/gds/hdlu24/cache_model", attn_implementation="eager").to(device)
 
 # Parameters
 eos_token_id = tokenizer.eos_token_id
@@ -99,6 +102,8 @@ def sample_top_k(logits, k, temperature):
     probs = F.softmax(top_k_logits, dim=-1)
     next_token = torch.multinomial(probs, num_samples=1).squeeze()
     return top_k_indices[0, next_token]
+
+torch.cuda.empty_cache()
 
 # Token generation loop
 step = 0

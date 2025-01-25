@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Define parameter values (a: 2,4,5,6,7; b: fixed at 2; c: 0-7)
-a_values=(2 4 5 6 7)
+a_values=(1 2 4 5 6 7)
 b=2
-c_values=$(seq 0 7)
+c_values=$(seq 1 7)
 
 # Default model selection (1-7 based on your interface)
 model_choice=1

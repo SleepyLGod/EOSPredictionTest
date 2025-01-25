@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define parameter combinations
-a_values=(2 4 5 6 7)       # Allowed values for parameter 'a'
+a_values=(1 2 4 5 6 7)       # Allowed values for parameter 'a'
 b=2                        # Fixed value for parameter 'b'
 c_values=$(seq 0 7)        # Sequence for parameter 'c' (0-7 inclusive)
 model_choices=(1)          # Default model selection (expand to (1 2 3 4 5 6 7) for multiple models)
