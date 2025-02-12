@@ -168,11 +168,11 @@ total_tokens = len(generated_tokens)
 generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 # Ensure the output directory exists
-output_dir = f'./scores/{model_name}_{dataset_choice}_prompt_{prompt_id}/'
+output_dir = f'./scores/{model_name}/'
 os.makedirs(output_dir, exist_ok=True)
 
 # Create a .txt file to save the prompt, generated output, and alert information
-txt_file_path = os.path.join(output_dir, 'generation_info.txt')
+txt_file_path = os.path.join(output_dir, f'ds_{dataset_choice}_p_{prompt_id}_gen_info.txt')
 with open(txt_file_path, 'w') as f:
     f.write(f"Prompt: {prompt}\n")
     f.write(f"Generated output: {generated_text}\n")
