@@ -30,7 +30,7 @@ datasets = {
 }
 
 SPECIAL_LABEL = -1
-CACHE_DIR = "~/.cache/huggingface/datasets"
+CACHE_DIR = "./.cache/huggingface/datasets"
 FEATURE_DIR = "./training_data/features"
 METADATA_DIR = "./training_data/metadata"
 DS_NAME = datasets[4]

@@ -4,4 +4,5 @@ images/
 .venv/
 .DS_Store
 training_data/
+.cache/huggingface/datasets
 ```
