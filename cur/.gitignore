@@ -5,4 +5,5 @@ images/
 .DS_Store
 training_data/
 .cache/huggingface/datasets
+*_responses.json
 ```
