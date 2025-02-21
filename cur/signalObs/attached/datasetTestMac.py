@@ -1,14 +1,14 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM, utils
-utils.logging.set_verbosity_error()  # Suppress standard warnings
-tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.2-1B')
-model = AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.2-1B')
-model.eval()  # Disable dropout (optional)
-
 import torch
 from datasets import load_dataset
 import numpy as np
 import matplotlib.pyplot as plt
 import psutil
+from transformers import AutoTokenizer, AutoModelForCausalLM, utils
+
+utils.logging.set_verbosity_error()  # Suppress standard warnings
+tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-3.2-1B')
+model = AutoModelForCausalLM.from_pretrained('meta-llama/Llama-3.2-1B')
+model.eval()  # Disable dropout (optional)
 
 # Set padding token
 tokenizer.pad_token = tokenizer.eos_token
@@ -106,7 +106,7 @@ def plot_metrics(metrics):
     plt.title('Average Attention Score per Head')
     plt.xlabel('Head Number')
     plt.ylabel('Average Attention Score')
-    plt.savefig('../images/avg_attention_per_head.png')
+    plt.savefig('../../images/avg_attention_per_head.png')
     plt.show()
     
     # Variance of attention scores per layer
@@ -115,7 +115,7 @@ def plot_metrics(metrics):
     plt.title('Variance of Attention Scores per Layer')
     plt.xlabel('Layer Number')
     plt.ylabel('Variance')
-    plt.savefig('../images/variance_per_layer.png')
+    plt.savefig('../../images/variance_per_layer.png')
     plt.show()
     
     # Entropy of attention distributions per head and layer
@@ -126,7 +126,7 @@ def plot_metrics(metrics):
         plt.title(f'Entropy - Layer {layer}')
         plt.colorbar()
     plt.tight_layout()
-    plt.savefig('../images/entropy_per_head_layer.png')
+    plt.savefig('../../images/entropy_per_head_layer.png')
     plt.show()
     
     # Correlation between attention scores of different heads within the same layer
@@ -137,7 +137,7 @@ def plot_metrics(metrics):
         plt.title(f'Correlation - Layer {layer}')
         plt.colorbar()
     plt.tight_layout()
-    plt.savefig('../images/correlation_per_head.png')
+    plt.savefig('../../images/correlation_per_head.png')
     plt.show()
 
 plot_metrics(metrics)

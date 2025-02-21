@@ -41,9 +41,9 @@ eos_flag=0
 # with open('./data/dataset_alpaca.json', 'r') as f:
 # with open('./data/datasetSimplified_alpaca.json', 'r') as f:
 datasets = {
-    1: './data/dataset_alpaca.json',
-    2: './data/datasetSimplified_alpaca.json',
-    3: './data/dataset_lmsys-chat-1m.json'
+    1: '../data/dataset_alpaca.json',
+    2: '../data/datasetSimplified_alpaca.json',
+    3: '../data/dataset_lmsys-chat-1m.json'
 }
 
 print("Choose the dataset to use:\n 1. Alpaca\n 2. Simplified Alpaca\n 3. LMSYS Chat 1M")
@@ -83,7 +83,7 @@ num_layers = model.config.num_hidden_layers
 num_heads = model.config.num_attention_heads
 
 # Create directory to store attention scores
-scores_dir = f'./.attention_scores/prompt_full_{prompt_id}/'
+scores_dir = f'../.attention_scores/prompt_full_{prompt_id}/'
 os.makedirs(scores_dir, exist_ok=True)
 
 # Initialize lists to collect attention scores
@@ -157,7 +157,7 @@ total_tokens = len(generated_tokens)
 generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 # Ensure the output directory exists for plots
-output_dir = f'./images/maps_final/{model_name}_{dataset_choice}_prompt_{prompt_id}/'
+output_dir = f'../images/maps_final/{model_name}_{dataset_choice}_prompt_{prompt_id}/'
 os.makedirs(output_dir, exist_ok=True)
 
 # Create a .txt file to save the prompt, generated output, and output length info

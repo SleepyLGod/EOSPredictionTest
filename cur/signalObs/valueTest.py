@@ -23,9 +23,9 @@ models = [
         ]
 
 datasets = {
-    1: './data/dataset_alpaca.json',
-    2: './data/datasetSimplified_alpaca.json',
-    3: './data/dataset_lmsys-chat-1m.json'
+    1: '../data/dataset_alpaca.json',
+    2: '../data/datasetSimplified_alpaca.json',
+    3: '../data/dataset_lmsys-chat-1m.json'
 }
 
 CACHE_DIR = "/research/d2/gds/hdlu24/cache_model"
@@ -96,7 +96,7 @@ num_layers = model.config.num_hidden_layers
 num_heads = model.config.num_attention_heads
 
 # Create directory to store attention scores
-scores_dir = f'./.attention_scores/prompt_full_{prompt_id}/'
+scores_dir = f'../.attention_scores/prompt_full_{prompt_id}/'
 os.makedirs(scores_dir, exist_ok=True)
 
 # Initialize lists to collect attention scores
@@ -168,7 +168,7 @@ total_tokens = len(generated_tokens)
 generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
 # Ensure the output directory exists
-output_dir = f'./scores/{model_name}/'
+output_dir = f'../scores/{model_name}/'
 os.makedirs(output_dir, exist_ok=True)
 
 # Create a .txt file to save the prompt, generated output, and alert information
