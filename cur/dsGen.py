@@ -41,14 +41,14 @@ datasets = {
 
 SPECIAL_LABEL = -1
 CACHE_DIR = "./.cache/huggingface/datasets"
-FEATURE_DIR = "./training_data/features"
-METADATA_DIR = "./training_data/metadata"
+FEATURE_DIR = "./training_data/features/llma3_8b_instruct"
+METADATA_DIR = "./training_data/metadata/llma3_8b_instruct"
 DS_NAME = datasets[4]
 
 temperatures = [0.1, 0.3, 0.5, 0.9] # low, mid, high creativity
-top_k_values = [1, 3, 5, 10] # low, mid, high diversity
+top_k_values = [1, 5, 10] # low, mid, high diversity
 repetition_penalties = [1.0, 1.3, 1.6] # low, mid, high coherence
-max_new_tokens_values = [100, 300, 500] # low, mid, high length
+max_new_tokens_values = [300, 500] # low, mid, high length
 # system_parameters = []
 # for temp in temperatures:
 #         for k in top_k_values:
@@ -101,7 +101,7 @@ data = {
 # print("Choose the model to test:")
 # for i, model in enumerate(models, 1):
 #     print(f" {i}. {model.split('/')[-1]}")
-model_choice = 2
+model_choice = 3
 # if model_choice < 1 or model_choice > len(models):
 #     raise ValueError(f"Invalid model choice. Please enter a number between 1 and {len(models)}")
 model_name = models[model_choice - 1]
