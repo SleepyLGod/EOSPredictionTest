@@ -98,12 +98,12 @@ data = {
 # print(json.dumps(data, indent=2))
 
 # Select model
-print("Choose the model to test:")
-for i, model in enumerate(models, 1):
-    print(f" {i}. {model.split('/')[-1]}")
-model_choice = int(input(f"Enter model number (1-{len(models)}): "))
-if model_choice < 1 or model_choice > len(models):
-    raise ValueError(f"Invalid model choice. Please enter a number between 1 and {len(models)}")
+# print("Choose the model to test:")
+# for i, model in enumerate(models, 1):
+#     print(f" {i}. {model.split('/')[-1]}")
+model_choice = 2
+# if model_choice < 1 or model_choice > len(models):
+#     raise ValueError(f"Invalid model choice. Please enter a number between 1 and {len(models)}")
 model_name = models[model_choice - 1]
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
