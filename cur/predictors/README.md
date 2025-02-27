@@ -21,3 +21,11 @@ Progress:
   - model problems: not trained yet.
 - others:
   - is the IDC server ready?
+
+**IMPORTANT**:
+During inference:
+- prompt->tokens (tokenization): in CPU; output: CPU tensors in RAM; no semantical information.
+- tokens->embeddings (embedding layer): including mapping the token_ids to high-dimentional vectors (1st, by look-up table) and positional encoding (2nd); in GPU by default; output: GPU tensors in GPU memory; semantical information.
+- attention layers...: in GPU
+
+=> so what about eliminate the 1st phase? just use the last token in the P phase to predict the length?
