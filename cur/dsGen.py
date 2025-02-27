@@ -51,29 +51,6 @@ temperatures = [0.1, 0.3, 0.5, 0.9] # low, mid, high creativity
 top_k_values = [1, 5, 10] # low, mid, high diversity
 repetition_penalties = [1.3, 1.6] # low, mid, high coherence
 max_new_tokens_values = [300, 500] # low, mid, high length
-# system_parameters = []
-# for temp in temperatures:
-#         for k in top_k_values:
-#                 for rep_pen in repetition_penalties:
-#                         for max_tok in max_new_tokens_values:
-#                                 system_parameters.append({
-#                                         'temperature': temp,
-#                                         'top_k': k,
-#                                         'repetition_penalty': rep_pen,
-#                                         'max_new_tokens': max_tok
-#                                 })
-# print(f"Total number of system parameters: {len(system_parameters)}")
-
-TEMP_SAMP = temperatures[1]
-TK_SAMP = top_k_values[2]
-REP_PEN_SAMP = repetition_penalties[2]
-MAX_TOKEN_LEN_SAMP = max_new_tokens_values[1]
-
-# Parameters
-max_new_tokens = MAX_TOKEN_LEN_SAMP # Maximum number of tokens to generate
-temperature = TEMP_SAMP  # Lower temperature for more deterministic output
-top_k = TK_SAMP  # Increase top_k for more diverse candidates
-repetition_penalty = REP_PEN_SAMP  # Increase repetition penalty to reduce repetition
 
 ds = load_dataset(DS_NAME)
 dataset = ds['train']
@@ -96,16 +73,7 @@ data = {
     ]
 }
 
-# print the output
-# print(json.dumps(data, indent=2))
-
-# Select model
-# print("Choose the model to test:")
-# for i, model in enumerate(models, 1):
-#     print(f" {i}. {model.split('/')[-1]}")
 model_choice = 1
-# if model_choice < 1 or model_choice > len(models):
-#     raise ValueError(f"Invalid model choice. Please enter a number between 1 and {len(models)}")
 model_name = models[model_choice - 1]
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
