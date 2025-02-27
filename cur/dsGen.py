@@ -43,8 +43,8 @@ datasets = {
 
 SPECIAL_LABEL = -1
 CACHE_DIR = "./.cache/huggingface/datasets"
-FEATURE_DIR = "./training_data/features/llma3_1b"
-METADATA_DIR = "./training_data/metadata/llma3_1b"
+FEATURE_DIR = "./training_data/features/llama3_1b"
+METADATA_DIR = "./training_data/metadata/llama3_1b"
 DS_NAME = datasets[4]
 
 temperatures = [0.1, 0.3, 0.5, 0.9] # low, mid, high creativity
@@ -173,7 +173,7 @@ def layer_selection(layer_idx):
     for deeper layers, have a higher chance to be selected
     """
     total_layers = model.config.num_hidden_layers
-    if layer_idx >= total_layers * 0.5:
+    if layer_idx >= total_layers * 0.75:
         return True
     return random.random() < 0.5
     
