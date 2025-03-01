@@ -73,6 +73,9 @@ data = {
     ]
 }
 
+ds_len = len(data['qa_pairs']) # 51760
+print(f"Total number of QA pairs: {ds_len}")
+
 model_choice = 1
 model_name = models[model_choice - 1]
 
@@ -162,11 +165,17 @@ def decode_params(encoded):
         'max_seq_len': (encoded & 0xFF) * 100
     }
 
+def prompt_selection():
+    """
+    Randomly select a prompt from the dataset
+    """
+    return random.random() < 0.01 # only select 1% of the 51760 prompts: 517 prompts
+
 def head_selection():
     """
     Select a head from the model, randomly chose about 25% of the heads
     """
-    return random.random() < 0.25
+    return random.random() < 0.1
 
 def layer_selection(layer_idx):
     """s
@@ -247,6 +256,8 @@ def ds_generator(model, tokenizer, data, device):
     for param in param_combinations:
         # traverse dataset
         for qa_idx, qa in enumerate(data['qa_pairs']):
+            if not prompt_selection():
+                continue
             try:
                 # initialize model
                 prompt = qa['prompt']
