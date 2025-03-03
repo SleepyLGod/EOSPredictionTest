@@ -35,25 +35,14 @@ models = [
 
 SPECIAL_LABEL = -1
 CACHE_DIR = "./.cache/huggingface/datasets"
-FEATURE_DIR = "./training_data/features"
-METADATA_DIR = "./training_data/metadata"
+FEATURE_DIR = "./training_data/vdb/features"
+METADATA_DIR = "./training_data/vdb/metadata"
 DS_NAME = "yahma/alpaca-cleaned"
 
 temperatures = [0.1, 0.3, 0.5, 0.9] # low, mid, high creativity
 top_k_values = [1, 3, 5, 10] # low, mid, high diversity
 repetition_penalties = [1.0, 1.3, 1.6] # low, mid, high coherence
 max_new_tokens_values =[100, 300, 500] # low, mid, high length
-
-TEMP_SAMP = temperatures[1]
-TK_SAMP = top_k_values[2]
-REP_PEN_SAMP = repetition_penalties[2]
-MAX_TOKEN_LEN_SAMP = max_new_tokens_values[1]
-
-# Parameters
-max_new_tokens = MAX_TOKEN_LEN_SAMP # Maximum number of tokens to generate
-temperature = TEMP_SAMP  # Lower temperature for more deterministic output
-top_k = TK_SAMP  # Increase top_k for more diverse candidates
-repetition_penalty = REP_PEN_SAMP  # Increase repetition penalty to reduce repetition
 
 ds = load_dataset(DS_NAME)
 dataset = ds['train']
@@ -72,7 +61,6 @@ data = {
         for prompt, output in zip(prompts, dataset["output"])
     ]
 }
-
 
 # Select model
 print("Choose the model to test:")
@@ -103,3 +91,4 @@ def sample_top_k(logits, k, temperature):
     top_k_logits, top_k_indices = torch.topk(logits, k) # Get top k candidates
     probs = F.softmax(top_k_logits, dim=-1)
     return top_k_indices[0, torch.multinomial(probs, 1).item()]
+
