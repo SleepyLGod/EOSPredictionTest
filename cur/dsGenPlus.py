@@ -56,7 +56,7 @@ CACHE_DIR = "./.cache/huggingface/datasets"
 FEATURE_DIR = "./training_data/logits/features/llama3_70b"
 METADATA_DIR = "./training_data/logits/metadata/llama3_70b"
 DS_NAME = datasets[4]
-TOP_K = 500
+TOP_K = 1000
 
 # Generation parameters
 temperatures = [0.1, 0.3, 0.5, 0.9]

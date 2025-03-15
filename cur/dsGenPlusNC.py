@@ -1,9 +1,9 @@
 '''
-# Description: This file contains the data structure for the dataset generator.
+Description: This file contains the data structure for the dataset generator.
 {
     "system_params": uint32,  # encoded
     "seq_pos": uint16,        
-    "embedding": float16[HiddenSize],  # half precision
+    "logits": float16[VocabSize],  # half precision
     "label": {
         "remaining_tokens": int,     # remaining tokens
         "over_max_seq_len": bool     # over max sequence length?
@@ -53,10 +53,9 @@ datasets = {
 }
 
 CACHE_DIR = "./.cache/huggingface/datasets"
-FEATURE_DIR = "./training_data/e/features/llama3_70b"
-METADATA_DIR = "./training_data/e/metadata/llama3_70b"
+FEATURE_DIR = "./training_data/logits/features/ds_14b_nc"
+METADATA_DIR = "./training_data/logits/metadata/ds_14b_nc"
 DS_NAME = datasets[4]
-TOP_K = 1000
 
 # Generation parameters
 temperatures = [0.1, 0.3, 0.5, 0.9]
@@ -76,7 +75,7 @@ data = {
 }
 
 # Load model
-model_choice = 3
+model_choice = 11
 model_name = models[model_choice - 1]
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,8 +83,7 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
     cache_dir=CACHE_DIR,
-    attn_implementation="eager",
-    output_hidden_states=True # Required for feature extraction
+    attn_implementation="eager"
 )
 
 # Utility functions
@@ -157,20 +155,19 @@ def ds_generator(model, tokenizer, data, device):
                 # Generation loop
                 for step in range(param['max_new_tokens']):
                     outputs = model(input_ids, attention_mask=attention_mask)
-                    last_hidden_state = outputs.hidden_states[-1][:, -1, :] # [1, HiddenSize]
+                    logits = outputs.logits[:, -1, :]
                     # logits_np = logits.detach().cpu().numpy().astype(np.float16)
                     seq_pos = input_ids.shape[1] - 1
                     cur_step = step + 1
                     
                     # Store features
                     features.append({
-                        'sys_para': encode_params(param),
-                        'pos': np.uint32(seq_pos),
+                        'system_params': encode_params(param),
+                        'seq_pos': np.uint32(seq_pos),
                         "step": np.uint32(cur_step),
-                        'ebd': last_hidden_state.detach().cpu().numpy().astype(np.float16),
+                        "logits": logits.detach().cpu().numpy().astype(np.float16),
                     })
-                    
-                    logits = outputs.logits[:, -1, :] # [1, VocabSize]
+
                     # Apply repetition penalty after appending logits to the features
                     if param['repetition_penalty'] != 1.0:
                         unique_tokens = set(generated_tokens)
@@ -200,8 +197,8 @@ def ds_generator(model, tokenizer, data, device):
                         remaining = param['max_new_tokens'] - (int(feat['seq_pos']) - prompt_len)
                         over_max = remaining < 0
                     labels.append({
-                        'rest_len': max(0, remaining),
-                        'over_max_len': over_max
+                        'remaining_tokens': max(0, remaining),
+                        'over_max_seq_len': over_max
                     })
 
                 # Save features and labels
@@ -224,13 +221,14 @@ def ds_generator(model, tokenizer, data, device):
                         'total_steps': total_steps,
                         'eos_encountered': eos_encountered,
                         'sample_feature': {
-                            'system_params': int(features[0]['sys_para']),
-                            'seq_pos': int(features[0]['pos']),
-                            'embedding': features[0]['ebd'],
+                            'system_params': int(features[0]['system_params']),
+                            'seq_pos': int(features[0]['seq_pos']),
+                            'step': int(features[0]['step']),
+                            'logits_shape': list(features[0]['logits'].shape)
                         },
                         'sample_label': {
-                            'remaining_tokens': labels[0]['rest_len'],
-                            'over_max_seq_len': labels[0]['over_max_len']
+                            'remaining_tokens': int(labels[0]['remaining_tokens']),
+                            'over_max_seq_len': bool(labels[0]['over_max_seq_len'])
                         }
                     }
                     with open(os.path.join(METADATA_DIR, f"{filename[:-4]}.json"), 'w') as f:
