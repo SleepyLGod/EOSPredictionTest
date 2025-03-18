@@ -56,7 +56,7 @@ CACHE_DIR = "./.cache/huggingface/datasets"
 FEATURE_DIR = "./training_data/e/features/llama3_70b"
 METADATA_DIR = "./training_data/e/metadata/llama3_70b"
 DS_NAME = datasets[4]
-TOP_K = 1000
+BATCH_SIZE = 4 
 
 # Generation parameters
 temperatures = [0.1, 0.3, 0.5, 0.9]
@@ -84,7 +84,9 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
     cache_dir=CACHE_DIR,
-    attn_implementation="eager",
+    low_cpu_mem_usage=True,  # Enable low CPU memory usage
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
     output_hidden_states=True # Required for feature extraction
 )
 
@@ -250,3 +252,104 @@ def ds_generator(model, tokenizer, data, device):
 # Execute
 ds_generator(model, tokenizer, data, device)
 print("Dataset generation completed.")
+
+
+# def ds_generator(model, tokenizer, data, device):
+#     model_name = model.config.name_or_path.replace('/', '_')
+#     os.makedirs(FEATURE_DIR, exist_ok=True)
+#     os.makedirs(METADATA_DIR, exist_ok=True)
+    
+#     # pre defined parameters
+#     param_combinations = [
+#         {'temperature': t, 'top_k': k, 'repetition_penalty': rp, 'max_new_tokens': msl} 
+#         for t in temperatures for k in top_k_values
+#         for rp in repetition_penalties for msl in max_new_tokens_values
+#     ]
+    
+#     total_samples = sum(1 for _ in data['qa_pairs'] if prompt_selection()) # 1% of prompts
+#     pbar = tqdm(total=len(param_combinations) * total_samples, desc="Generating Dataset")
+    
+#     for param in param_combinations:
+#         selected_qa = [qa for qa in data['qa_pairs'] if prompt_selection()]
+#         for batch_start in range(0, len(selected_qa), BATCH_SIZE):
+#             batch = selected_qa[batch_start:batch_start+BATCH_SIZE]
+#             batch_prompts = [qa['prompt'] for qa in batch]
+            
+#             try:
+#                 inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True).to(device)
+#                 generated = model.generate(
+#                     inputs.input_ids,
+#                     attention_mask=inputs.attention_mask,
+#                     max_new_tokens=param['max_new_tokens'],
+#                     temperature=param['temperature'],
+#                     top_k=param['top_k'],
+#                     repetition_penalty=param['repetition_penalty'],
+#                     output_hidden_states=True,
+#                     return_dict_in_generate=True,
+#                     pad_token_id=tokenizer.eos_token_id
+#                 )
+                
+#                 for i, qa in enumerate(batch):
+#                     # extract hidden states and generate tokens
+#                     prompt_len = inputs.input_ids[i].ne(tokenizer.pad_token_id).sum().item()
+#                     generated_tokens = generated.sequences[i, prompt_len:]
+                    
+#                     # confirm the actual steps
+#                     eos_pos = (generated_tokens == tokenizer.eos_token_id).nonzero()
+#                     actual_steps = eos_pos[0].item()+1 if eos_pos.nelement()>0 else param['max_new_tokens']
+                    
+#                     features, labels = [], []
+#                     for step in range(actual_steps):
+#                         seq_pos = prompt_len + step
+#                         features.append({
+#                             'sys_para': encode_params(param),
+#                             'pos': np.uint32(seq_pos),
+#                             'step': np.uint32(step+1),
+#                             'ebd': generated.hidden_states[step][i][-1].cpu().numpy().astype(np.float16)
+#                         })
+#                         if eos_pos.nelement() > 0:
+#                             remaining = (prompt_len + actual_steps) - seq_pos - 1
+#                             over_max = False
+#                         else:
+#                             remaining = param['max_new_tokens'] - step - 1
+#                             over_max = remaining < 0
+#                         labels.append({
+#                             'rest_len': max(0, remaining),
+#                             'over_max_len': over_max
+#                         })
+                        
+#                     filename = f"{model_name}_t{param['temperature']}_tk{param['top_k']}_r{param['repetition_penalty']}_mok{param['max_new_tokens']}_qa{batch_start+i}.npz"
+#                     np.savez_compressed(
+#                         os.path.join(FEATURE_DIR, filename),
+#                         features=np.array(features, dtype=object),
+#                         labels=np.array(labels, dtype=object)
+#                     )
+                    
+#                     metadata = {
+#                         'prompt': qa['prompt'],
+#                         'generated_tokens': generated_tokens[:actual_steps].tolist(),
+#                         'generated_text': tokenizer.decode(generated_tokens[:actual_steps]),
+#                         'total_steps': actual_steps,
+#                         'eos_encountered': eos_pos.nelement() > 0,
+#                         'sample_feature': features[0],
+#                         'sample_label': labels[0]
+#                     }
+#                     with open(os.path.join(METADATA_DIR, f"{filename[:-4]}.json"), 'w') as f:
+#                         json.dump(metadata, f, indent=2)
+                    
+#                     pbar.update(1)
+                
+#                 del generated
+#                 torch.cuda.empty_cache()
+                
+#             except RuntimeError as e:
+#                 if "CUDA out of memory" in str(e):
+#                     print(f"Skipping batch {batch_start} due to OOM")
+#                     torch.cuda.empty_cache()
+#                 else:
+#                     raise
+#     pbar.close()
+    
+# # Execute
+# ds_generator(model, tokenizer, data, device)
+# print("Dataset generation completed.")

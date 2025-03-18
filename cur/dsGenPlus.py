@@ -57,6 +57,7 @@ FEATURE_DIR = "./training_data/logits/features/llama3_70b"
 METADATA_DIR = "./training_data/logits/metadata/llama3_70b"
 DS_NAME = datasets[4]
 TOP_K = 1000
+BATCH_SIZE = 4 
 
 # Generation parameters
 temperatures = [0.1, 0.3, 0.5, 0.9]
@@ -84,7 +85,8 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
     cache_dir=CACHE_DIR,
-    attn_implementation="eager"
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
 )
 
 # Utility functions
@@ -122,6 +124,21 @@ def decode_params(encoded):
         'repetition_penalty': ((encoded >> 9) & 0xFF) / 255 * 0.3 + 1.3,
         'max_new_tokens': ((encoded >> 6) & 0x7) * 100  # 0x7=0111
     }
+
+def process_batch(inputs, param):
+    outputs = model.generate(
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_new_tokens=param['max_new_tokens'],
+        temperature=param['temperature'],
+        top_k=param['top_k'],
+        repetition_penalty=param['repetition_penalty'],
+        do_sample=True,
+        output_scores=True,
+        return_dict_in_generate=True,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    return outputs
 
 def prompt_selection():
     return random.random() < 0.01  # 1% of prompts
@@ -252,3 +269,70 @@ def ds_generator(model, tokenizer, data, device):
 # Execute
 ds_generator(model, tokenizer, data, device)
 print("Dataset generation completed.")
+
+
+
+# def ds_generator():
+#     os.makedirs(FEATURE_DIR, exist_ok=True)
+#     os.makedirs(METADATA_DIR, exist_ok=True)
+    
+#     param_combinations = [
+#         {'temperature': t, 'top_k': k, 'repetition_penalty': rp, 'max_new_tokens': msl} 
+#         for t in temperatures for k in top_k_values
+#         for rp in repetition_penalties for msl in max_new_tokens_values
+#     ]
+    
+#     selected_qa = [qa for qa in data['qa_pairs'] if random.random() < 0.01]  # 1%采样
+#     total_batches = (len(selected_qa) + BATCH_SIZE - 1) // BATCH_SIZE
+    
+#     for param in param_combinations:
+#         pbar = tqdm(total=total_batches, desc=f"Processing {param}")
+#         for batch_idx in range(0, len(selected_qa), BATCH_SIZE):
+#             batch = selected_qa[batch_idx:batch_idx+BATCH_SIZE]
+#             batch_prompts = [qa['prompt'] for qa in batch]
+            
+#             try:
+#                 inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True).to('cuda')
+#                 outputs = process_batch(inputs, param)
+#                 scores = outputs.scores
+#                 sequences = outputs.sequences
+                
+#                 for i, qa in enumerate(batch):
+#                     prompt_len = inputs.input_ids[i].ne(tokenizer.pad_token_id).sum().item()
+#                     generated = sequences[i][prompt_len:]
+#                     eos_pos = (generated == tokenizer.eos_token_id).nonzero()
+#                     actual_steps = eos_pos[0].item() + 1 if eos_pos.size(0) > 0 else len(generated)
+                    
+#                     features = []
+#                     for step in range(actual_steps):
+#                         logits = scores[step][i]
+#                         topk_val, topk_idx = torch.topk(logits, TOP_K)
+#                         features.append({
+#                             'system_params': encode_params(param),
+#                             'seq_pos': np.uint32(prompt_len + step),
+#                             'topk_values': topk_val.cpu().numpy().astype(np.float16),
+#                             'topk_indices': topk_idx.cpu().numpy().astype(np.uint16)
+#                         })
+                    
+#                     # 保存特征和元数据
+#                     filename = f"param_{encode_params(param)}_batch{batch_idx}_item{i}.npz"
+#                     np.savez_compressed(os.path.join(FEATURE_DIR, filename), features=np.array(features))
+#                     metadata = {
+#                         'prompt': qa['prompt'],
+#                         'param': param,
+#                         'generated': tokenizer.decode(generated)
+#                     }
+#                     with open(os.path.join(METADATA_DIR, f"{filename[:-4]}.json"), 'w') as f:
+#                         json.dump(metadata, f)
+#             except RuntimeError as e:
+#                 if 'CUDA out of memory' in str(e):
+#                     torch.cuda.empty_cache()
+#                     print(f"Skipped batch {batch_idx} due to OOM")
+#                 else:
+#                     raise
+#             pbar.update(1)
+#         pbar.close()
+
+# if __name__ == "__main__":
+#     ds_generator()
+#     print("Dataset generation completed.")
