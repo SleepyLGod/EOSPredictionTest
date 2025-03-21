@@ -49,7 +49,8 @@ FEATURE_DIR = "./training_data/logits_as/features/llama3_70b"
 METADATA_DIR = "./training_data/logits_as/metadata/llama3_70b"
 DS_NAME = 'yahma/alpaca-cleaned'
 TOP_K = 1000
-BATCH_SIZE = 4 
+BATCH_SIZE = 4
+CACHE_WINDOW = 128
 
 # Generation parameters
 temperatures = [0.1, 0.3, 0.5, 0.9]
@@ -87,6 +88,9 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     device_map="auto",
     cache_dir=CACHE_DIR,
+    max_memory={i: "40GB" for i in range(6)}, # Set max memory for each device
+    offload_folder="offload",  # Enable offloading
+    offload_state_dict=True,  # Offload the model's state dict
     low_cpu_mem_usage=True,  # Enable low CPU memory usage
     torch_dtype=torch.bfloat16,
     attn_implementation=attn_implementation,
@@ -148,6 +152,7 @@ def prompt_selection():
 
 # Dataset generator
 def ds_generator(model, tokenizer, data, device):
+    global CACHE_WINDOW
     model_name = model.config.name_or_path.replace('/', '_')
     os.makedirs(FEATURE_DIR, exist_ok=True)
     os.makedirs(METADATA_DIR, exist_ok=True)
@@ -177,13 +182,17 @@ def ds_generator(model, tokenizer, data, device):
                 # Generation loop
                 past_key_values = None
                 for step in range(param['max_new_tokens']):
+                    current_len = prompt_len + step
+                    if current_len > 0 and (current_len % CACHE_WINDOW == 0):
+                        past_key_values = None
+                    
                     outputs = model(
                         input_ids if step == 0 else input_ids[:, -1:],
                         attention_mask=attention_mask,
-                        past_key_values=past_key_values,
-                        use_cache=True
+                        # past_key_values=past_key_values,
+                        # use_cache=True
                     )
-                    past_key_values = outputs.past_key_values
+                    # past_key_values = outputs.past_key_values
                     temp_scaled_logits = outputs.logits[:, -1, :]
                     if param['repetition_penalty'] != 1.0:
                         for token in generated_tokens_set:
@@ -277,6 +286,8 @@ def ds_generator(model, tokenizer, data, device):
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     print(f"OOM at {qa_idx} with param {param}")
+                    CACHE_WINDOW = max(32, CACHE_WINDOW // 2)
+                    print(f"Reducing cache window to {CACHE_WINDOW}")
                     torch.cuda.empty_cache()
                     continue
                 else:
