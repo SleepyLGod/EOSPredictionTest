@@ -23,6 +23,8 @@ DROPOUT_RATE = 0.3
 BATCH_SIZE = 256    # batch_size
 LEARNING_RATE = 1e-3
 EPOCHS = 50         # more epoch to learn embedding features
+REG_WEIGHT = 0.6    # [0.0-1.0]
+CLS_WEIGHT = 0.4    # automatically calculated to 1.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CUR_DIR = Path(__file__).parent.absolute()
@@ -159,7 +161,7 @@ class EnhancedMLP(nn.Module):
         cls_out = self.cls_head(fused).squeeze(-1)
         return reg_out, cls_out
 
-def train_step(model, batch, reg_criterion, cls_criterion):
+def train_step(model, batch, reg_criterion, cls_criterion, reg_weight=REG_WEIGHT, cls_weight=CLS_WEIGHT):
     # move data to device
     device_batch = {k: v.to(DEVICE) for k, v in batch.items()}
     reg_labels = device_batch.pop('remaining')
@@ -171,14 +173,19 @@ def train_step(model, batch, reg_criterion, cls_criterion):
     # loss calculation
     reg_loss = reg_criterion(reg_pred, reg_labels)
     cls_loss = cls_criterion(cls_pred, cls_labels)
-    return 0.6*reg_loss + 0.4*cls_loss
+    total_weight = reg_weight + cls_weight
+    return (reg_weight/total_weight)*reg_loss + (cls_weight/total_weight)*cls_loss
 
 def collate_fn(batch):
     original_size = len(batch)
     batch = [b for b in batch if b is not None]
+    if len(batch) == 0:
+        raise RuntimeError("Empty batch after filtering")
     filtered = original_size - len(batch)
     if filtered > 0:
         logging.info(f"Warning: filter {filtered} samples from batch")
+        if filtered / original_size > 0.1:  # Example threshold: 10%
+            raise RuntimeError(f"Too many failed samples ({filtered}/{original_size})")
     return torch.utils.data.default_collate(batch)
 
 def main():
@@ -207,15 +214,16 @@ def main():
         shuffle=True,
         num_workers=8, 
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        drop_last=False # whether to drop the last incomplete batch
     )
     
     # model initialization
-    # model = EnhancedMLP(HIDDEN_SIZE).to(DEVICE)
-    model = EnhancedMLP(HIDDEN_SIZE).to(DEVICE)
+    model = EnhancedMLP(HIDDEN_SIZE)
     if torch.cuda.device_count() > 1:
         logging.info(f"Using {torch.cuda.device_count()} GPUs!")
         model = nn.DataParallel(model)
+    model = model.to(DEVICE)  # Move after DataParallel if needed
     
     # optimizer and scheduler
     optimizer = torch.optim.AdamW(
@@ -225,7 +233,8 @@ def main():
         betas=(0.9, 0.999)
     )
     
-    total_steps = EPOCHS * ((len(dataset) + BATCH_SIZE - 1) // BATCH_SIZE)
+    # total_steps = EPOCHS * ((len(dataset) + BATCH_SIZE - 1) // BATCH_SIZE)
+    total_steps = EPOCHS * len(dataloader)
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
@@ -252,7 +261,14 @@ def main():
         total_loss = 0
         for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch+1}")):
             optimizer.zero_grad()
-            loss = train_step(model, batch, reg_criterion, cls_criterion)
+            loss = train_step(
+                model, 
+                batch, 
+                reg_criterion, 
+                cls_criterion, 
+                reg_weight=REG_WEIGHT, 
+                cls_weight=CLS_WEIGHT
+            )
             loss.backward()
             
             # grad_norms = [p.grad.norm().item() for p in model.parameters() if p.grad is not None]
