@@ -38,7 +38,7 @@ LOG_DIR.mkdir(exist_ok=True)
 log_file = LOG_DIR / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.FileHandler(log_file), logging.StreamHandler()] # log to both file and console
 )
@@ -189,12 +189,16 @@ def main():
     
     pos_count = 0
     rest_lengths = []
-    for i in tqdm(range(len(dataset)), desc="data analysis"):
-        sample = dataset[i]
-        if sample is None:
-            continue
-        pos_count += sample['over_max']
-        rest_lengths.append(sample['remaining'])
+    for path in tqdm(dataset.file_paths, desc="data loading"):
+        try:
+            with np.load(path, allow_pickle=True, mmap_mode='r') as data:
+                labs = data['labels']
+                # forcefully load the labels
+                over_max_flags = (labs['over_max_len'] > 0.5).astype(int)
+                pos_count += np.sum(over_max_flags)
+                rest_lengths.extend(labs['rest_len'])
+        except Exception as e:
+            logging.error(f"Error processing file {path}: {e}")
     
     dataloader = DataLoader(
         dataset, 
@@ -208,11 +212,10 @@ def main():
     
     # model initialization
     # model = EnhancedMLP(HIDDEN_SIZE).to(DEVICE)
-    model = EnhancedMLP(HIDDEN_SIZE)
+    model = EnhancedMLP(HIDDEN_SIZE).to(DEVICE)
     if torch.cuda.device_count() > 1:
         logging.info(f"Using {torch.cuda.device_count()} GPUs!")
         model = nn.DataParallel(model)
-    model.to(DEVICE)
     
     # optimizer and scheduler
     optimizer = torch.optim.AdamW(
@@ -228,7 +231,9 @@ def main():
         optimizer, 
         max_lr=2e-3, 
         total_steps=total_steps, # total_steps=EPOCHS*len(dataloader),
-        pct_start=0.3
+        pct_start=0.3,
+        div_factor=10,  # 初始学习率降为max_lr/10
+        final_div_factor=100  # 最终学习率降为max_lr/100
     )
     logging.info(f"Total training steps: {total_steps}")
     
@@ -245,19 +250,24 @@ def main():
     for epoch in range(EPOCHS):
         model.train()
         total_loss = 0
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}"):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch+1}")):
             optimizer.zero_grad()
             loss = train_step(model, batch, reg_criterion, cls_criterion)
             loss.backward()
-            grad_norms = [p.grad.norm().item() for p in model.parameters() if p.grad is not None]
-            if grad_norms:
-                max_norm = np.percentile(grad_norms, 90)
-                max_norm = max(0.5, min(max_norm, 5.0))  # clamp to [0.5, 5.0]
-            else:
-                max_norm = 1.0
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-            logging.debug(f"Gradient Clip: max_norm={max_norm:.2f}")
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            # grad_norms = [p.grad.norm().item() for p in model.parameters() if p.grad is not None]
+            # if grad_norms:
+            #     max_norm = np.percentile(grad_norms, 90)
+            #     max_norm = max(0.5, min(max_norm, 5.0))  # clamp to [0.5, 5.0]
+            # else:
+            #     max_norm = 1.0
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # gradient clipping
+            # gradient monitoring
+            if batch_idx % 50 == 0 and logging.getLogger().getEffectiveLevel() <= logging.DEBUG:
+                total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in model.parameters() if p.grad is not None]))
+                logging.debug(f"Grad Norm: {total_norm.item():.2f}")
+            
             optimizer.step()
             scheduler.step()
             total_loss += loss.item()
