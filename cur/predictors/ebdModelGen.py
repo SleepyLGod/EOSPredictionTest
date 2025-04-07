@@ -16,11 +16,16 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModelForCausalLM, utils
 
-HIDDEN_SIZE = 4096  # Llama-3 hidden size
+torch.backends.cuda.max_split_size_mb = 128 # set max split size to avoid fragmentation
+torch.cuda.set_per_process_memory_fraction(0.9) # limit GPU memory usage
+
+HIDDEN_SIZE = 8192  # Llama-3 hidden size: 8192 = 1024 * 8
 DROPOUT_RATE = 0.3
-BATCH_SIZE = 256    # batch_size
+BATCH_SIZE = 128    # batch_size
 LEARNING_RATE = 1e-3
 EPOCHS = 50         # more epoch to learn embedding features
 REG_WEIGHT = 0.6    # [0.0-1.0]
@@ -60,50 +65,115 @@ def decode_params(encoded):
 
 class EmbeddingDataset(Dataset):
     def __init__(self, feature_dir):
-        self.file_paths = [
-            os.path.join(feature_dir, f) 
-            for f in os.listdir(feature_dir) if f.endswith('.npz')
-        ]
+        self.file_paths = []
         self.cumulative_samples = []
-        # pre-compute the cumulative samples
-        total = 0
-        for path in self.file_paths:
-            with np.load(path, allow_pickle=True) as data:
-                n = len(data['features'])
-                self.cumulative_samples.append((total, total + n))
-                total += n
-        self.total_samples = total
+        self.file_sample_counts = []
         
+        # 严格校验每个文件
+        sorted_files = sorted(os.listdir(feature_dir))
+        for f in sorted_files:
+            file_path = os.path.join(feature_dir, f)
+            if not file_path.endswith('.npz'):
+                continue
+                
+            try:
+                with np.load(file_path, allow_pickle=True) as data:
+                    # 必须包含features和labels
+                    assert 'features' in data and 'labels' in data, "Missing required arrays"
+                    features = data['features']
+                    labels = data['labels']
+                    # 非空校验
+                    assert len(features) > 0, "Empty features"
+                    assert len(labels) > 0, "Empty labels"
+                    # 长度一致性校验
+                    assert len(features) == len(labels), "Length mismatch"
+                    assert features.dtype == object and labels.dtype == object, "Expected object dtype"
+                    if len(features) > 0:
+                        assert isinstance(features[0], dict), "Features should be dict"
+                        assert isinstance(labels[0], dict), "Labels should be dict"
+                    n_samples = len(features)
+                    self.file_paths.append(file_path)
+                    self.file_sample_counts.append(n_samples)
+            except Exception as e:
+                logging.error(f"INVALID FILE {file_path}: {str(e)}")
+                continue  # 跳过无效文件
+        
+        # empty file check
+        if not self.file_paths:
+            raise RuntimeError(f"数据集目录 {feature_dir} 中没有有效文件")
+        # calculate cumulative samples
+        total = 0
+        for i, path in enumerate(self.file_paths):
+            n = self.file_sample_counts[i]
+            self.cumulative_samples.append((total, total + n))
+            # logging.debug(f"File {path}: samples={n}, range=({total}, {total + n})")
+            total += n
+        self.total_samples = total
+        logging.info(f"Total files: {len(self.file_paths)}, Total samples: {self.total_samples}")
+    
     def __len__(self):
         return self.total_samples
     
     def __getitem__(self, idx):
+        if idx >= self.total_samples or idx < 0:
+            logging.error(f"Invalid idx {idx}, total_samples={self.total_samples}")
+            return None
         # get the file index and sample index
-        file_idx = bisect.bisect_right(
-            [cs[1] for cs in self.cumulative_samples], idx
-        ) - 1
+        start_list = [cs[0] for cs in self.cumulative_samples]
+        file_idx = bisect.bisect_right(start_list, idx) - 1
+        if file_idx < 0 or file_idx >= len(self.file_paths):
+            logging.error(f"Invalid file_idx {file_idx} for idx {idx}")
+            return None
         start, end = self.cumulative_samples[file_idx]
         sample_idx = idx - start
-        
-        try:
-            with np.load(self.file_paths[file_idx], allow_pickle=True, mmap_mode='r') as data:
-                feat = data['features'][sample_idx]
-                lab = data['labels'][sample_idx]
-        except Exception as e:
-            logging.error(f"Error loading file {self.file_paths[file_idx]}: {e}")
+        if sample_idx >= self.file_sample_counts[file_idx]:
+            logging.error(f"IndexError: sample_idx {sample_idx} >= {self.file_sample_counts[file_idx]} in file {self.file_paths[file_idx]}")
             return None
-            
-        params = decode_params(feat['system_params'].item())
-        return {
-            'temperature': np.float32((params['temperature'] - 0.1) / 0.8),
-            'top_k': np.float32(params['top_k'] / 100.0),
-            'repetition_penalty': np.float32((params['repetition_penalty'] - 1.3) / 0.3),
-            'max_len': np.float32((params['max_new_tokens'] - 300) / 200.0),  
-            'seq_pos': np.float32(feat['seq_pos'].item() / 4096.0),
-            'embedding': feat['embedding'].astype(np.float32),
-            'remaining': np.float32(lab['rest_len']),
-            'over_max': np.float32(lab['over_max_len'])
-        }
+        try:
+            with np.load(
+                self.file_paths[file_idx], 
+                allow_pickle=True, 
+                mmap_mode='r'
+            ) as data:
+                feat_dict = data['features'][sample_idx]
+                lab_dict = data['labels'][sample_idx]
+                
+                required_feat_keys = ['sys_para', 'pos', 'ebd']
+                required_lab_keys = ['rest_len', 'over_max_len']
+                for key in required_feat_keys:
+                    if key not in feat_dict:
+                        raise KeyError(f"Missing key {key} in features")
+                for key in required_lab_keys:
+                    if key not in lab_dict:
+                        raise KeyError(f"Missing key {key} in labels")
+                
+                encoded_param = feat_dict['sys_para']
+                seq_pos = feat_dict['pos']
+                embedding = feat_dict['ebd']
+                rest_len = lab_dict['rest_len']
+                over_max = lab_dict['over_max_len']
+                
+                params = decode_params(encoded_param)
+                
+                return {
+                    'temperature': np.float32((params['temperature'] - 0.1) / 0.8),
+                    'top_k': np.float32(params['top_k'] / 100.0),
+                    'repetition_penalty': np.float32((params['repetition_penalty'] - 1.3) / 0.3),
+                    'max_len': np.float32((params['max_new_tokens'] - 300) / 200.0),  
+                    'seq_pos': np.float32(seq_pos / 4096.0),
+                    'embedding': embedding.astype(np.float32),
+                    'remaining': np.float32(rest_len),
+                    'over_max': np.float32(over_max)
+                }
+        except Exception as e:
+                error_info = f"""
+                Error Details:
+                - File: {self.file_paths[file_idx]}
+                - Sample Index: {sample_idx}
+                - Original Error: {str(e)}
+                """
+                logging.error(error_info)
+                return None
 
 class EnhancedMLP(nn.Module):
     def __init__(self, hidden_size):
@@ -133,7 +203,7 @@ class EnhancedMLP(nn.Module):
         
         # residual connection
         self.residual = nn.Linear(hidden_size + 5, 1024)
-
+    
     def forward(self, x):
         # check feature dimensions
         for param in ['temperature', 'top_k', 'repetition_penalty', 'max_len', 'seq_pos']:
@@ -179,14 +249,24 @@ def train_step(model, batch, reg_criterion, cls_criterion, reg_weight=REG_WEIGHT
 def collate_fn(batch):
     original_size = len(batch)
     batch = [b for b in batch if b is not None]
+    if not batch:
+        return {}
     if len(batch) == 0:
         raise RuntimeError("Empty batch after filtering")
     filtered = original_size - len(batch)
     if filtered > 0:
-        logging.info(f"Warning: filter {filtered} samples from batch")
+        logging.warning(f"Filtered {filtered}/{original_size} samples from batch")
         if filtered / original_size > 0.1:  # Example threshold: 10%
             raise RuntimeError(f"Too many failed samples ({filtered}/{original_size})")
-    return torch.utils.data.default_collate(batch)
+    collated = torch.utils.data.dataloader.default_collate(batch)
+    if not torch.isfinite(collated['embedding']).all():
+        logging.error("NaN or Inf detected in collated batch")
+        return {}
+    for key in ['temperature', 'top_k', 'repetition_penalty', 'max_len', 'seq_pos']:
+        if collated[key].min() < 0.0 or collated[key].max() > 1.0:
+            logging.error(f"Invalid value in {key}: min={collated[key].min()}, max={collated[key].max()}")
+            return {}
+    return collated
 
 def main():
     # os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5"
@@ -196,16 +276,28 @@ def main():
     
     pos_count = 0
     rest_lengths = []
-    for path in tqdm(dataset.file_paths, desc="data loading"):
+    error_files = []
+    for path in tqdm(dataset.file_paths, desc="加载数据"):
         try:
-            with np.load(path, allow_pickle=True, mmap_mode='r') as data:
+            with np.load(path, allow_pickle=True) as data:
                 labs = data['labels']
-                # forcefully load the labels
-                over_max_flags = (labs['over_max_len'] > 0.5).astype(int)
-                pos_count += np.sum(over_max_flags)
-                rest_lengths.extend(labs['rest_len'])
+                # 遍历 labs 中的每个字典
+                for lab in labs:
+                    rest_len = lab['rest_len']  # 直接访问字典键
+                    over_max = lab['over_max_len']  # 使用测试中确认的键名
+                    pos_count += int(over_max)  # 转换为整数（True -> 1, False -> 0）
+                    rest_lengths.append(rest_len)
         except Exception as e:
-            logging.error(f"Error processing file {path}: {e}")
+            error_files.append(path)
+            logging.error(f"处理文件失败 {path}: {str(e)}")
+            continue  # 继续处理下一个文件
+
+    # 空数据详细报告
+    if not rest_lengths:
+        logging.critical("以下文件导致数据加载失败:")
+        for f in error_files:
+            logging.critical(f" - {f}")
+        raise RuntimeError("所有数据文件均无效，请检查上述文件")
     
     dataloader = DataLoader(
         dataset, 
@@ -248,7 +340,17 @@ def main():
     
     # setting for loss functions
     pos_weight = (len(rest_lengths) - pos_count) / max(pos_count, 1e-6)
-    delta = np.quantile(np.abs(rest_lengths - np.mean(rest_lengths)), 0.9)
+    try:
+        rest_arr = np.array(rest_lengths, dtype=np.float32)
+        if len(rest_arr) == 0:
+            raise ValueError("空数组")
+            
+        rest_mean = np.nanmean(rest_arr)  # 忽略NaN
+        abs_diff = np.abs(rest_arr - rest_mean)
+        delta = np.nanquantile(abs_diff, 0.9)  # 忽略NaN
+    except Exception as e:
+        delta = 1.0
+        logging.warning(f"使用安全delta值1.0,原因: {str(e)}")
     
     # loss functions
     reg_criterion = nn.HuberLoss(delta=float(delta))
@@ -308,8 +410,58 @@ def main():
         torch.save(checkpoint, checkpoint_path)
         logging.info(f"Checkpoint saved to {checkpoint_path}")
 
+def datacheck():
+    problem_file = "meta-llama_Meta-Llama-3-70B_t0.9_tk100_r1.3_mok300_qa3464.npz"
+    path = os.path.join(FEATURE_DIR, problem_file)
+    with np.load(path, allow_pickle=True) as data:
+            print("Features dtype:", data['features'].dtype)
+            print("First feature:", data['features'][0])
+            print("Labels dtype:", data['labels'].dtype)
+            print("First label:", data['labels'][0])
+            print()
+
+def check_dataset(feature_dir):
+    for f in os.listdir(feature_dir):
+        if not f.endswith('.npz'):
+            continue
+        file_path = os.path.join(feature_dir, f)
+        try:
+            with np.load(file_path, allow_pickle=True) as data:
+                features = data['features']
+                labels = data['labels']
+                logging.info(f"{file_path}: {len(features)} samples")
+                assert len(features) == len(labels), "Length mismatch"
+        except Exception as e:
+            logging.error(f"Error in {file_path}: {str(e)}")
+
+def inspect_problem_file():
+    problem_file = "meta-llama_Meta-Llama-3-70B_t0.1_tk100_r1.6_mok500_qa50087.npz"  # 替换为实际文件名
+    path = os.path.join(FEATURE_DIR, problem_file)
+    with np.load(path, allow_pickle=True) as data:
+        features = data['features']
+        labels = data['labels']
+        print(f"File: {path}")
+        print(f"Features shape: {features.shape}, Labels shape: {labels.shape}")
+        # 检查所有样本的键
+        for i in range(len(features)):
+            try:
+                feat = features[i]
+                lab = labels[i]
+                assert all(k in feat for k in ['sys_para', 'pos', 'ebd'])
+                assert all(k in lab for k in ['rest_len', 'over_max_len'])
+            except Exception as e:
+                print(f"Invalid sample {i}: {str(e)}")
+
 if __name__ == "__main__":
-    main()
+    # datacheck()
+    # inspect_problem_file()
+    print(f"CUDA Available: {torch.cuda.is_available()}")
+    print(f"Available GPUs: {torch.cuda.device_count()}")
+    torch.cuda.empty_cache()
+    # check_dataset(FEATURE_DIR)
+    logging.info(f"Available GPUs: {torch.cuda.device_count()}")
+    logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
+    # main()
 
     # # save the model
     # if isinstance(model, nn.DataParallel):
@@ -333,7 +485,7 @@ if __name__ == "__main__":
             
 #             for future in tqdm(futures, desc="Loading files"):
 #                 self.samples.extend(future.result())
-                
+    
 #     def _load_file(self, path):
 #         samples = []
 #         with np.load(path, allow_pickle=True) as data:
