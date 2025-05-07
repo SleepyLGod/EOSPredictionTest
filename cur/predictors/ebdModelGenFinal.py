@@ -1,8 +1,6 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3,4,5"
-
 import math
-import json
+# import json # 未直接使用
 import bisect
 import torch
 import random
@@ -11,48 +9,99 @@ import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
-from scipy import sparse
+import sys # For exiting
 from datetime import datetime
-import matplotlib.pyplot as plt
-from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from transformers import AutoTokenizer, AutoModelForCausalLM, utils
+import torch.multiprocessing as mp
+from torch.cuda.amp import GradScaler, autocast
+
+os.environ['NCCL_DEBUG'] = 'INFO' # set NCCL debug level
 
 torch.backends.cuda.max_split_size_mb = 128 # set max split size to avoid fragmentation
 torch.cuda.set_per_process_memory_fraction(0.9) # limit GPU memory usage
 
-HIDDEN_SIZE = 8192  # Llama-3 hidden size: 8192 = 1024 * 8
-DROPOUT_RATE = 0.3
-BATCH_SIZE = 128    # batch_size
+HIDDEN_SIZE = 8192
+BATCH_SIZE_PER_GPU = 32
+GRADIENT_ACCUMULATION_STEPS = 4
 LEARNING_RATE = 1e-3
-EPOCHS = 50         # more epoch to learn embedding features
-REG_WEIGHT = 0.6    # [0.0-1.0]
-CLS_WEIGHT = 0.4    # automatically calculated to 1.0
+EPOCHS = 50
+USE_AMP = True
+MEMORY_FRACTION_PER_GPU = 0.8
+MAX_CONSECUTIVE_EMPTY_BATCHES = 20 # 如果连续这么多批次为空，则终止
+EMPTY_BATCH_EPOCH_THRESHOLD = 0.5 # 如果一个epoch中空批次比例超过此值，发出严重警告
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-CUR_DIR = Path(__file__).parent.absolute()
+CUR_DIR = Path(__file__).parent.absolute() if "__file__" in locals() else Path.cwd()
 FEATURE_DIR = CUR_DIR.parent / "training_data" / "ebd" / "features" / "llama3_70b"
-METADATA_DIR = CUR_DIR.parent / "training_data" / "ebd" / "metadata" / "llama3_70b"
+# METADATA_DIR = CUR_DIR.parent / "training_data" / "ebd" / "metadata" / "llama3_70b"
 
 if not FEATURE_DIR.exists():
     raise FileNotFoundError(f"feature directory non-exist: {FEATURE_DIR}")
 
+SAVE_DIR_BASE = CUR_DIR / "saved_models"
+# SAVE_DIR.mkdir(exist_ok=True)
+# model_save_path = SAVE_DIR / "enhanced_mlp.pth"
+
 # logging configuration
-LOG_DIR = CUR_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-log_file = LOG_DIR / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+LOG_DIR_BASE = CUR_DIR / "logs"
+# LOG_DIR.mkdir(exist_ok=True)
+# log_file = LOG_DIR / f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(log_file), logging.StreamHandler()] # log to both file and console
-)
+# logging.basicConfig(
+#     level=logging.DEBUG,
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+#     handlers=[logging.FileHandler(log_file), logging.StreamHandler()] # log to both file and console
+# )
 
-SAVE_DIR = CUR_DIR / "saved_models"
-SAVE_DIR.mkdir(exist_ok=True)
-model_save_path = SAVE_DIR / "enhanced_mlp.pth"
+def setup_logging(rank, log_dir_base):
+    run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    current_log_dir = log_dir_base / run_timestamp
+    current_log_dir.mkdir(parents=True, exist_ok=True) # exist_ok=True handles potential (though unlikely) race conditions
+
+    log_file_suffix = f"_rank{rank}" if dist.is_initialized() and dist.get_world_size() > 1 else ""
+    log_file = current_log_dir / f"train{log_file_suffix}.log"
+    
+    handlers = [logging.FileHandler(log_file)]
+    is_main_process = rank == 0
+    
+    if is_main_process:
+        handlers.append(logging.StreamHandler())
+        
+    log_format = "%(asctime)s [%(levelname)s]"
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        log_format += " (Rank %(rank)s)"
+    log_format += " %(message)s"
+
+    root_logger = logging.getLogger()
+    # Clear existing handlers from root logger to avoid duplicate logs if script is re-run in same session
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    root_logger.setLevel(logging.INFO if is_main_process else logging.WARNING)
+    formatter = logging.Formatter(log_format)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        old_factory = logging.getLogRecordFactory()
+        def record_factory(*args, **kwargs):
+            record = old_factory(*args, **kwargs)
+            record.rank = dist.get_rank()
+            return record
+        if logging.getLogRecordFactory() != record_factory: # Avoid re-setting if already set
+            logging.setLogRecordFactory(record_factory)
+    
+    return current_log_dir
+
+def get_current_save_dir(save_dir_base, log_dir):
+    run_timestamp = log_dir.name
+    current_save_dir = save_dir_base / run_timestamp
+    current_save_dir.mkdir(parents=True, exist_ok=True)
+    return current_save_dir
+
 
 def decode_params(encoded):
     encoded = int(encoded)
@@ -462,65 +511,3 @@ if __name__ == "__main__":
     logging.info(f"Available GPUs: {torch.cuda.device_count()}")
     logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
     main()
-
-    # # save the model
-    # if isinstance(model, nn.DataParallel):
-    #     torch.save(model.module.state_dict(), model_save_path) # multi-GPU
-    # else:
-    #     torch.save(model.state_dict(), model_save_path)  # single GPU
-    # logging.info(f"model saved to: {model_save_path}")
-
-# class EmbeddingDataset(Dataset):
-#     def __init__(self, feature_dir):
-#         self.samples = []
-#         # index loading (in parellel)
-#         from concurrent.futures import ThreadPoolExecutor
-#         with ThreadPoolExecutor(max_workers=8) as executor:
-#             futures = []
-#             for fname in os.listdir(feature_dir):
-#                 if not fname.endswith('.npz'):
-#                     continue
-#                 path = os.path.join(feature_dir, fname)
-#                 futures.append(executor.submit(self._load_file, path))
-            
-#             for future in tqdm(futures, desc="Loading files"):
-#                 self.samples.extend(future.result())
-    
-#     def _load_file(self, path):
-#         samples = []
-#         with np.load(path, allow_pickle=True) as data:
-#             features = data['features']
-#             labels = data['labels']
-#             for feat, lab in zip(features, labels):
-#                 # decoding parameters
-#                 params = decode_params(feat['system_params'].item())
-                
-#                 # normalizing features
-#                 norm_features = {
-#                     'temperature': (params['temperature'] - 0.1) / 0.8,
-#                     'top_k': params['top_k'] / 100.0,
-#                     'repetition_penalty': (params['repetition_penalty'] - 1.3) / 0.3,
-#                     'max_len': (params['max_new_tokens'] - 300) / 200.0,
-#                     'seq_pos': feat['seq_pos'].item() / 4096.0,
-#                     'embedding': feat['embedding'].astype(np.float32),  # float16->float32
-#                     'remaining': lab['rest_len'],
-#                     'over_max': float(lab['over_max_len'])
-#                 }
-#                 samples.append(norm_features)
-#         return samples
-    
-#     def __len__(self):
-#         return len(self.samples)
-    
-#     def __getitem__(self, idx):
-#         sample = self.samples[idx]
-#         return {
-#             'temperature': torch.tensor(sample['temperature'], dtype=torch.float32),
-#             'top_k': torch.tensor(sample['top_k'], dtype=torch.float32),
-#             'repetition_penalty': torch.tensor(sample['repetition_penalty'], dtype=torch.float32),
-#             'max_len': torch.tensor(sample['max_len'], dtype=torch.float32),
-#             'seq_pos': torch.tensor(sample['seq_pos'], dtype=torch.float32),
-#             'embedding': torch.tensor(sample['embedding'], dtype=torch.float32),
-#             'remaining': torch.tensor(sample['remaining'], dtype=torch.float32),
-#             'over_max': torch.tensor(sample['over_max'], dtype=torch.float32)
-#         }
