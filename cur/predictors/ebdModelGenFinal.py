@@ -10,7 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from pathlib import Path
 import sys # For exiting
-from datetime import datetime
+from datetime import datetime, timedelta
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -341,7 +341,15 @@ def collate_fn(batch_list):
 def setup_ddp(rank, world_size, memory_fraction):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    init_timeout = timedelta(minutes=20)
+    dist.init_process_group(
+        backend="nccl",
+        # init_method='env://', # 或者保持默认，如果 MASTER_ADDR/PORT 已设置
+        rank=rank,
+        world_size=world_size,
+        timeout=init_timeout
+    )
+    
     torch.cuda.set_device(rank)
     if memory_fraction > 0 and memory_fraction <= 1.0:
         try:
@@ -360,61 +368,90 @@ def cleanup_ddp():
 def train_worker(rank, world_size, args):
     current_log_dir = setup_logging(rank, args['log_dir_base'])
     current_save_dir = get_current_save_dir(args['save_dir_base'], current_log_dir)
-    
+
+    # --- 1. 初始化 DDP 环境 (包括 init_process_group) ---
     if world_size > 1:
         setup_ddp(rank, world_size, args['memory_fraction'])
     
-    device = rank
-    
-    dataset = EmbeddingDataset(args['feature_dir'], rank=rank, world_size=world_size)
-    
-    rest_lengths_for_delta = []
-    actual_samples_for_delta_calc = 0 # MODIFICATION: Track samples used for delta
+    device = rank # rank is the GPU ID for this process in DDP
+
+    # --- 2. Huber Loss Delta Calculation & Synchronization ---
+    # 创建一个 tensor 来持有 delta 值，所有进程都创建它。Rank 0 会更新它。
+    # 使用 .to(device) 确保 tensor 在正确的 GPU 上，以便 NCCL broadcast
+    huber_delta_tensor = torch.tensor(1.0, dtype=torch.float32, device=device) # Default value
+
     if rank == 0:
-        logging.info("Rank 0: Scanning dataset for HuberLoss delta calculation...")
-        temp_stat_dataset = EmbeddingDataset(args['feature_dir']) 
-        if len(temp_stat_dataset) > 0:
-            sample_size_for_delta = min(len(temp_stat_dataset), 500000)
-            indices = random.sample(range(len(temp_stat_dataset)), sample_size_for_delta)
-            actual_samples_for_delta_calc = len(indices) # MODIFICATION
-            for i in tqdm(indices, desc="Scanning rest_len for Huber delta", disable=(rank!=0)):
-                sample = temp_stat_dataset[i]
-                if sample and 'remaining' in sample:
-                    if np.isfinite(sample['remaining']):
-                        rest_lengths_for_delta.append(sample['remaining'])
-        del temp_stat_dataset
-        logging.info(f"Rank 0: Used {actual_samples_for_delta_calc} samples to gather 'rest_len' for Huber delta calculation.") # MODIFICATION
-    
-    if world_size > 1:
-        if rank == 0:
-            rest_lengths_tensor = torch.tensor(rest_lengths_for_delta, dtype=torch.float32).cuda(rank)
-            size_tensor = torch.tensor(len(rest_lengths_tensor), dtype=torch.long).cuda(rank)
-        else: 
-            size_tensor = torch.empty(1, dtype=torch.long).cuda(rank)
-        dist.broadcast(size_tensor, src=0)
-        if rank != 0: 
-            rest_lengths_tensor = torch.empty(size_tensor.item(), dtype=torch.float32).cuda(rank)
-        dist.broadcast(rest_lengths_tensor, src=0)
-        rest_lengths_for_delta = rest_lengths_tensor.cpu().tolist()
-    
-    huber_delta = 1.0 
-    if not rest_lengths_for_delta:
-        if rank == 0: logging.warning("No valid 'rest_len' data found for HuberLoss delta. Using default delta=1.0.")
-    else:
+        logging.info("Rank 0: Preparing to calculate HuberLoss delta...")
+        rest_lengths_for_delta_calc = []
+        actual_samples_for_delta_calc = 0
+        
+        # Rank 0 进行数据扫描以收集 rest_len
+        # 注意: 为了计算 delta，Rank 0 可能需要访问整个数据集的元信息或样本。
+        # 这里的 EmbeddingDataset 实例是为了统计，不是 DDP 训练用的那个。
+        # 如果这个初始化本身很慢，可以考虑优化这部分数据的收集方式。
         try:
-            rest_arr = np.array(rest_lengths_for_delta, dtype=np.float32)
-            if len(rest_arr) == 0: raise ValueError("Empty array after collecting finite rest_lengths")
-            rest_mean = np.nanmean(rest_arr)
-            if np.isnan(rest_mean): raise ValueError("Mean of rest_lengths is NaN.")
-            abs_diff = np.abs(rest_arr - rest_mean)
-            calculated_delta = np.nanquantile(abs_diff, 0.9)
-            if np.isnan(calculated_delta) or calculated_delta <= 1e-6:
-                if rank == 0: logging.warning(f"Calculated delta is problematic ({calculated_delta}), using default delta=1.0.")
+            # 临时的、仅 Rank 0 使用的数据集实例，用于统计
+            # 传递 rank=0, world_size=1 确保它看到所有文件（如果其内部逻辑支持）
+            # 或者，如果 EmbeddingDataset 的默认行为就是加载所有，则不需要 rank/world_size 参数
+            temp_stat_dataset = EmbeddingDataset(args['feature_dir']) # rank=0, world_size=1 (或者不传，取决于实现)
+            
+            if len(temp_stat_dataset) > 0:
+                # 考虑减少样本量以加快速度，例如10万或20万，而不是50万
+                sample_size_for_delta = min(len(temp_stat_dataset), args.get('delta_calc_sample_size', 200000)) 
+                indices = random.sample(range(len(temp_stat_dataset)), sample_size_for_delta)
+                actual_samples_for_delta_calc = len(indices)
+                
+                logging.info(f"Rank 0: Scanning {actual_samples_for_delta_calc} random samples for Huber delta calculation...")
+                for i in tqdm(indices, desc="Scanning rest_len for Huber delta", disable=(rank!=0)): # tqdm 只在 rank 0 显示
+                    sample = temp_stat_dataset[i]
+                    if sample and 'remaining' in sample and np.isfinite(sample['remaining']):
+                        rest_lengths_for_delta_calc.append(sample['remaining'])
             else:
-                huber_delta = float(calculated_delta)
+                logging.warning("Rank 0: Temporary dataset for delta calculation is empty.")
+
+            del temp_stat_dataset # 及时释放资源
         except Exception as e:
-            if rank == 0: logging.warning(f"Failed to calculate HuberLoss delta (Reason: {str(e)}). Using default delta=1.0.")
-    if rank == 0: logging.info(f"Using HuberLoss with delta: {huber_delta:.4f}")
+            logging.error(f"Rank 0: Error during data collection for Huber delta: {e}. Using default delta.")
+            rest_lengths_for_delta_calc = [] #确保列表为空，使用默认delta
+
+        logging.info(f"Rank 0: Collected {len(rest_lengths_for_delta_calc)} valid 'rest_len' values from {actual_samples_for_delta_calc} scanned samples.")
+
+        # Rank 0 计算 delta
+        calculated_huber_delta = 1.0 # Default
+        if rest_lengths_for_delta_calc:
+            try:
+                rest_arr = np.array(rest_lengths_for_delta_calc, dtype=np.float32)
+                if len(rest_arr) == 0: raise ValueError("Empty array after collecting finite rest_lengths for delta.")
+                
+                rest_mean = np.nanmean(rest_arr)
+                if np.isnan(rest_mean): raise ValueError("Mean of rest_lengths is NaN for delta calculation.")
+                
+                abs_diff = np.abs(rest_arr - rest_mean)
+                c_delta = np.nanquantile(abs_diff, 0.9) # 0.9 quantile of absolute differences
+                
+                if not (np.isnan(c_delta) or c_delta <= 1e-6): # Ensure delta is a sensible positive value
+                    calculated_huber_delta = float(c_delta)
+                else:
+                    logging.warning(f"Rank 0: Calculated delta was problematic ({c_delta}). Using default delta 1.0.")
+            except Exception as e:
+                logging.warning(f"Rank 0: Failed to calculate HuberLoss delta from collected data (Reason: {str(e)}). Using default delta 1.0.")
+        
+        huber_delta_tensor[0] = calculated_huber_delta # 更新 Rank 0 上的 tensor 值
+        logging.info(f"Rank 0: Calculated Huber delta: {huber_delta_tensor.item():.4f}")
+
+    # --- 3. 同步 Huber Delta 值 ---
+    if world_size > 1:
+        # 所有进程参与广播，将 Rank 0 的 huber_delta_tensor 值广播给所有其他进程
+        dist.broadcast(huber_delta_tensor, src=0)
+    
+    # 所有进程从其本地的 (可能已更新的) tensor 中获取 float 类型的 delta 值
+    huber_delta = huber_delta_tensor.item() 
+    # 确保所有rank都记录它们将使用的delta
+    logging.info(f"Rank {rank}: Using HuberLoss with delta: {huber_delta:.4f}")
+
+
+    # --- 4. 初始化用于训练的数据集和 DataLoader (DDP 感知) ---
+    dataset = EmbeddingDataset(args['feature_dir'], rank=rank, world_size=world_size)
     
     sampler = None
     dataloader_shuffle = True
@@ -423,132 +460,164 @@ def train_worker(rank, world_size, args):
             dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
         )
         dataloader_shuffle = False
-    
+
     dataloader = DataLoader(
-        dataset, batch_size=args['batch_size_per_gpu'], shuffle=dataloader_shuffle,
-        num_workers=args['num_workers'], pin_memory=True, 
+        dataset, 
+        batch_size=args['batch_size_per_gpu'], 
+        shuffle=dataloader_shuffle,
+        num_workers=args['num_workers'], 
+        pin_memory=True, 
         persistent_workers=True if args['num_workers'] > 0 else False,
-        collate_fn=collate_fn, sampler=sampler, drop_last=True
+        collate_fn=collate_fn, 
+        sampler=sampler, 
+        drop_last=True # drop_last=True is important for DDP
     )
     
+    # --- 5. 模型、优化器、调度器、损失函数初始化 ---
     model = EnhancedMLP(args['hidden_size']).to(device)
     if world_size > 1:
         model = DDP(model, device_ids=[device], output_device=device, find_unused_parameters=False) 
     
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args['learning_rate'], weight_decay=1e-4, betas=(0.9, 0.999)
+        model.parameters(), 
+        lr=args['learning_rate'], 
+        weight_decay=1e-4, 
+        betas=(0.9, 0.999)
     )
     
+    # 计算调度器的总步数
+    # len(dataloader) 是每个 GPU 的批次数，这对于梯度累积是正确的
     num_update_steps_per_epoch = len(dataloader) // args['gradient_accumulation_steps']
     if len(dataloader) % args['gradient_accumulation_steps'] != 0:
-        num_update_steps_per_epoch +=1
+        num_update_steps_per_epoch +=1 
+    
     total_scheduler_steps = args['epochs'] * num_update_steps_per_epoch
     if rank == 0: 
-        logging.info(f"Effective batches per epoch per GPU (len(dataloader)): {len(dataloader)}")
-        logging.info(f"Optimizer update steps per epoch: {num_update_steps_per_epoch}")
+        logging.info(f"DataLoader length (batches per GPU per epoch): {len(dataloader)}")
+        logging.info(f"Optimizer update steps per epoch per GPU: {num_update_steps_per_epoch}")
         logging.info(f"Total scheduler steps for OneCycleLR: {total_scheduler_steps}")
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args['learning_rate'], total_steps=total_scheduler_steps,
-        pct_start=0.3, div_factor=10, final_div_factor=100
+        optimizer, 
+        max_lr=args['learning_rate'], 
+        total_steps=total_scheduler_steps,
+        pct_start=0.3, 
+        div_factor=10, 
+        final_div_factor=100
     )
     
-    reg_criterion = nn.HuberLoss(delta=huber_delta)
+    reg_criterion = nn.HuberLoss(delta=huber_delta) # 使用同步后的 delta
     scaler = GradScaler(enabled=args['use_amp'])
     
+    # --- 6. 训练循环 ---
     best_loss = float('inf')
     model_save_path_best = current_save_dir / "enhanced_mlp_best.pth"
-    
-    # MODIFICATION: Counters for empty batch monitoring
     consecutive_empty_batches = 0
     
     for epoch in range(args['epochs']):
-        if sampler: sampler.set_epoch(epoch)
+        if sampler: sampler.set_epoch(epoch) # DDP sampler需要设置 epoch
         model.train()
-        total_loss_epoch_accum = 0.0
-        num_optimizer_steps_epoch = 0
-        total_empty_batches_in_epoch = 0 # MODIFICATION
+        total_loss_epoch_accum = 0.0    # 用于记录当前rank的累积损失 (未除以累积步数)
+        num_optimizer_steps_epoch = 0 # 当前rank实际执行的优化器步数
+        total_processed_micro_batches = 0 # 处理的微批次数
+        total_empty_batches_in_epoch = 0
+        
         data_iterator = dataloader
         if rank == 0:
             data_iterator = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}", unit="batch")
         
-        optimizer.zero_grad()
+        optimizer.zero_grad() # 在每个epoch或累积周期开始时清零梯度
         
         for batch_idx, batch_data in enumerate(data_iterator):
-            if not batch_data: 
-                total_empty_batches_in_epoch += 1 # MODIFICATION
-                consecutive_empty_batches += 1    # MODIFICATION
+            if not batch_data: # 如果 collate_fn 返回空字典
+                total_empty_batches_in_epoch += 1
+                consecutive_empty_batches += 1
                 if rank == 0: 
-                    logging.warning(f"Skipping empty batch at epoch {epoch+1}, raw_batch_idx {batch_idx}. Consecutive empty: {consecutive_empty_batches}")
-                if consecutive_empty_batches >= MAX_CONSECUTIVE_EMPTY_BATCHES: # MODIFICATION
+                    logging.warning(f"Skipping empty batch at epoch {epoch+1}, micro_batch_idx {batch_idx}. Consecutive empty: {consecutive_empty_batches}")
+                if consecutive_empty_batches >= args['max_consecutive_empty_batches']:
                     if rank == 0:
-                        logging.critical(f"Stopping training: Exceeded maximum consecutive empty batches ({MAX_CONSECUTIVE_EMPTY_BATCHES}). Check data quality or dataset/collate_fn logic.")
-                    if world_size > 1: dist.barrier() # Ensure all processes log before exiting
-                    sys.exit(f"Rank {rank} exiting due to too many consecutive empty batches.") # Exit all processes
+                        logging.critical(f"Stopping training: Exceeded maximum consecutive empty batches ({args['max_consecutive_empty_batches']}).")
+                    if world_size > 1: dist.barrier() # 确保所有进程在退出前有机会记录
+                    sys.exit(f"Rank {rank} exiting due to too many consecutive empty batches.")
                 continue
             
-            consecutive_empty_batches = 0 # MODIFICATION: Reset if batch is valid
+            consecutive_empty_batches = 0 # 重置计数器
+            total_processed_micro_batches +=1
             
             try:
                 input_features = {k: v.to(device, non_blocking=True) for k, v in batch_data.items() if k != 'remaining'}
                 reg_labels = batch_data['remaining'].to(device, non_blocking=True)
             except Exception as e:
-                if rank == 0: logging.error(f"Error moving batch to device: {e}. Skipping batch.")
-                continue
+                if rank == 0: logging.error(f"Error moving batch {batch_idx} to device: {e}. Skipping batch.")
+                continue # 跳过这个有问题的批次
             
             with autocast(enabled=args['use_amp']):
                 reg_pred = model(input_features)
                 loss = reg_criterion(reg_pred, reg_labels)
             
             if loss is None or torch.isnan(loss) or torch.isinf(loss):
-                if rank == 0: logging.warning(f"NaN/Inf loss detected at epoch {epoch+1}, batch {batch_idx}. Skipping grad update for this batch.")
+                if rank == 0: logging.warning(f"NaN/Inf loss detected at epoch {epoch+1}, micro_batch {batch_idx}. Skipping gradient update for this batch.")
+                # 梯度已经是NaN/Inf，不需要累积，但要确保优化器不会在坏梯度上更新
+                # 如果这是累积周期的第一步，后续的累积也可能受影响。
+                # 这里选择跳过这个微批次的梯度贡献。
                 continue 
             
-            loss_val_for_accum = loss.item() # Store for logging before scaling for grad accum
-            loss = loss / args['gradient_accumulation_steps']
-            scaler.scale(loss).backward()
-            total_loss_epoch_accum += loss_val_for_accum # Accumulate original loss value for averaging
+            loss_val_for_reporting = loss.item() # 用于累加报告的损失值 (未除以累积步数)
             
-            if (batch_idx + 1) % args['gradient_accumulation_steps'] == 0 or (batch_idx + 1) == len(dataloader):
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
-                scheduler.step()
+            # 为梯度累积缩放损失
+            scaled_loss = loss / args['gradient_accumulation_steps']
+            
+            scaler.scale(scaled_loss).backward() # 反向传播缩放后的损失
+            
+            total_loss_epoch_accum += loss_val_for_reporting # 累加原始损失值
+            
+            # 执行优化器步骤和梯度清零
+            if (batch_idx + 1) % args['gradient_accumulation_steps'] == 0 or \
+                (batch_idx + 1) == len(dataloader): # 在累积了足够步数或到达 epoch 末尾时
+                
+                scaler.unscale_(optimizer) # 在裁剪前 unscale 梯度
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # 梯度裁剪
+                
+                scaler.step(optimizer) # 执行优化器步骤 (如果梯度有效)
+                scaler.update() # 更新 GradScaler 的缩放因子
+                
+                optimizer.zero_grad() # 清零梯度，为下一个累积周期或下一个 epoch 做准备
+                scheduler.step() # 在优化器步骤之后更新学习率
                 num_optimizer_steps_epoch +=1
         
-        avg_loss_this_rank = total_loss_epoch_accum / len(dataloader) if len(dataloader) > 0 else 0.0 # Average over number of micro-batches processed
+        # 计算当前 rank 的平均损失 (基于处理过的微批次)
+        avg_loss_this_rank = total_loss_epoch_accum / total_processed_micro_batches if total_processed_micro_batches > 0 else 0.0
         
+        # 同步所有 rank 的平均损失以获得全局平均损失
         if world_size > 1:
             avg_loss_tensor = torch.tensor(avg_loss_this_rank, device=device)
-            dist.all_reduce(avg_loss_tensor, op=dist.ReduceOp.AVG)
+            dist.all_reduce(avg_loss_tensor, op=dist.ReduceOp.AVG) # 计算所有rank的平均损失
             avg_loss_epoch_global = avg_loss_tensor.item()
         else:
             avg_loss_epoch_global = avg_loss_this_rank
         
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]['lr'] # 获取当前学习率
         
         if rank == 0:
             logging.info(
                 f"Epoch {epoch+1} Summary: Avg Global Loss (per micro-batch): {avg_loss_epoch_global:.4f} | "
-                f"LR: {current_lr:.2e} | OptSteps: {num_optimizer_steps_epoch}"
+                f"LR: {current_lr:.2e} | OptSteps This Epoch: {num_optimizer_steps_epoch}"
             )
-            # MODIFICATION: Log empty batch ratio for the epoch
             empty_batch_ratio = total_empty_batches_in_epoch / len(dataloader) if len(dataloader) > 0 else 0
-            logging.info(f"Epoch {epoch+1}: Empty batch ratio: {empty_batch_ratio:.2%} ({total_empty_batches_in_epoch}/{len(dataloader)})")
-            if empty_batch_ratio > EMPTY_BATCH_EPOCH_THRESHOLD:
+            logging.info(f"Epoch {epoch+1}: Empty micro-batch ratio: {empty_batch_ratio:.2%} ({total_empty_batches_in_epoch}/{len(dataloader)})")
+            if empty_batch_ratio > args['empty_batch_epoch_threshold']:
                 logging.critical(
-                    f"Epoch {epoch+1}: High empty batch ratio ({empty_batch_ratio:.2%}) exceeded threshold ({EMPTY_BATCH_EPOCH_THRESHOLD:.0%}). "
-                    "Strongly consider checking data quality."
+                    f"Epoch {epoch+1}: High empty micro-batch ratio ({empty_batch_ratio:.2%}) exceeded threshold "
+                    f"({args['empty_batch_epoch_threshold']:.0%}). Consider data quality check."
                 )
             
-            if avg_loss_epoch_global < best_loss:
+            if avg_loss_epoch_global < best_loss and total_processed_micro_batches > 0 : # 只有在处理了数据且损失更好时才保存
                 best_loss = avg_loss_epoch_global
                 logging.info(f"Best global loss updated: {best_loss:.4f}. Saving model to {model_save_path_best}")
                 state_to_save = model.module.state_dict() if world_size > 1 else model.state_dict()
                 torch.save(state_to_save, model_save_path_best)
             
+            # 保存检查点
             checkpoint_path = current_save_dir / f"checkpoint_epoch_{epoch+1}.pth"
             checkpoint = {
                 'epoch': epoch,
@@ -556,19 +625,20 @@ def train_worker(rank, world_size, args):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),
-                'loss': avg_loss_epoch_global,
+                'loss': avg_loss_epoch_global, # 保存的是全局平均损失
                 'best_loss': best_loss,
-                'huber_delta': huber_delta,
-                'args': args
+                'huber_delta': huber_delta, # 保存实际使用的 delta
+                'args': args # 保存用于此次训练的参数
             }
             torch.save(checkpoint, checkpoint_path)
             logging.info(f"Checkpoint saved to {checkpoint_path}")
     
+    # --- 7. 训练结束后的清理 ---
     if world_size > 1:
         cleanup_ddp()
     if rank == 0:
         logging.info(f"Training complete. Best model saved at {model_save_path_best}")
-        logging.info(f"Final logs and checkpoints are in {current_log_dir.parent}")
+        logging.info(f"Final logs and checkpoints are in {current_log_dir.parent}") # 指向包含时间戳的父目录
 
 def datacheck():
     problem_file = "meta-llama_Meta-Llama-3-70B_t0.9_tk100_r1.3_mok300_qa3464.npz"
@@ -652,7 +722,7 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     # check_dataset(FEATURE_DIR)
     logging.info(f"Available GPUs: {torch.cuda.device_count()}")
-    logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
+    # logging.info(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
@@ -662,4 +732,4 @@ if __name__ == "__main__":
         # 'spawn' is generally safer cross-platform and for CUDA.
         print("Note: Multiprocessing start method 'spawn' was already set or could not be forced. Continuing.")
         pass 
-    # main()
+    main()
