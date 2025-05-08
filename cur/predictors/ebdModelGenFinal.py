@@ -368,88 +368,107 @@ def cleanup_ddp():
 def train_worker(rank, world_size, args):
     current_log_dir = setup_logging(rank, args['log_dir_base'])
     current_save_dir = get_current_save_dir(args['save_dir_base'], current_log_dir)
-
+    
     # --- 1. 初始化 DDP 环境 (包括 init_process_group) ---
     if world_size > 1:
         setup_ddp(rank, world_size, args['memory_fraction'])
     
     device = rank # rank is the GPU ID for this process in DDP
-
-    # --- 2. Huber Loss Delta Calculation & Synchronization ---
-    # 创建一个 tensor 来持有 delta 值，所有进程都创建它。Rank 0 会更新它。
-    # 使用 .to(device) 确保 tensor 在正确的 GPU 上，以便 NCCL broadcast
-    huber_delta_tensor = torch.tensor(1.0, dtype=torch.float32, device=device) # Default value
-
-    if rank == 0:
-        logging.info("Rank 0: Preparing to calculate HuberLoss delta...")
-        rest_lengths_for_delta_calc = []
-        actual_samples_for_delta_calc = 0
-        
-        # Rank 0 进行数据扫描以收集 rest_len
-        # 注意: 为了计算 delta，Rank 0 可能需要访问整个数据集的元信息或样本。
-        # 这里的 EmbeddingDataset 实例是为了统计，不是 DDP 训练用的那个。
-        # 如果这个初始化本身很慢，可以考虑优化这部分数据的收集方式。
-        try:
-            # 临时的、仅 Rank 0 使用的数据集实例，用于统计
-            # 传递 rank=0, world_size=1 确保它看到所有文件（如果其内部逻辑支持）
-            # 或者，如果 EmbeddingDataset 的默认行为就是加载所有，则不需要 rank/world_size 参数
-            temp_stat_dataset = EmbeddingDataset(args['feature_dir']) # rank=0, world_size=1 (或者不传，取决于实现)
-            
-            if len(temp_stat_dataset) > 0:
-                # 考虑减少样本量以加快速度，例如10万或20万，而不是50万
-                sample_size_for_delta = min(len(temp_stat_dataset), args.get('delta_calc_sample_size', 200000)) 
-                indices = random.sample(range(len(temp_stat_dataset)), sample_size_for_delta)
-                actual_samples_for_delta_calc = len(indices)
-                
-                logging.info(f"Rank 0: Scanning {actual_samples_for_delta_calc} random samples for Huber delta calculation...")
-                for i in tqdm(indices, desc="Scanning rest_len for Huber delta", disable=(rank!=0)): # tqdm 只在 rank 0 显示
-                    sample = temp_stat_dataset[i]
-                    if sample and 'remaining' in sample and np.isfinite(sample['remaining']):
-                        rest_lengths_for_delta_calc.append(sample['remaining'])
-            else:
-                logging.warning("Rank 0: Temporary dataset for delta calculation is empty.")
-
-            del temp_stat_dataset # 及时释放资源
-        except Exception as e:
-            logging.error(f"Rank 0: Error during data collection for Huber delta: {e}. Using default delta.")
-            rest_lengths_for_delta_calc = [] #确保列表为空，使用默认delta
-
-        logging.info(f"Rank 0: Collected {len(rest_lengths_for_delta_calc)} valid 'rest_len' values from {actual_samples_for_delta_calc} scanned samples.")
-
-        # Rank 0 计算 delta
-        calculated_huber_delta = 1.0 # Default
-        if rest_lengths_for_delta_calc:
-            try:
-                rest_arr = np.array(rest_lengths_for_delta_calc, dtype=np.float32)
-                if len(rest_arr) == 0: raise ValueError("Empty array after collecting finite rest_lengths for delta.")
-                
-                rest_mean = np.nanmean(rest_arr)
-                if np.isnan(rest_mean): raise ValueError("Mean of rest_lengths is NaN for delta calculation.")
-                
-                abs_diff = np.abs(rest_arr - rest_mean)
-                c_delta = np.nanquantile(abs_diff, 0.9) # 0.9 quantile of absolute differences
-                
-                if not (np.isnan(c_delta) or c_delta <= 1e-6): # Ensure delta is a sensible positive value
-                    calculated_huber_delta = float(c_delta)
-                else:
-                    logging.warning(f"Rank 0: Calculated delta was problematic ({c_delta}). Using default delta 1.0.")
-            except Exception as e:
-                logging.warning(f"Rank 0: Failed to calculate HuberLoss delta from collected data (Reason: {str(e)}). Using default delta 1.0.")
-        
-        huber_delta_tensor[0] = calculated_huber_delta # 更新 Rank 0 上的 tensor 值
-        logging.info(f"Rank 0: Calculated Huber delta: {huber_delta_tensor.item():.4f}")
-
-    # --- 3. 同步 Huber Delta 值 ---
-    if world_size > 1:
-        # 所有进程参与广播，将 Rank 0 的 huber_delta_tensor 值广播给所有其他进程
-        dist.broadcast(huber_delta_tensor, src=0)
     
-    # 所有进程从其本地的 (可能已更新的) tensor 中获取 float 类型的 delta 值
-    huber_delta = huber_delta_tensor.item() 
-    # 确保所有rank都记录它们将使用的delta
-    logging.info(f"Rank {rank}: Using HuberLoss with delta: {huber_delta:.4f}")
+    # --- 2. Huber Loss Delta Calculation & Synchronization ---
+    # fixed delta value for Huber Loss
+    fixed_delta_value = 1.0 
+    huber_delta_tensor = torch.tensor(fixed_delta_value, dtype=torch.float32, device=device)
+    
+    if rank == 0:
+        logging.info(f"Rank 0: Using fixed Huber delta: {fixed_delta_value}")
 
-
+    # --- [3. 同步 Huber Delta 值 (虽然值是固定的，但保持 broadcast 以测试 DDP 通信) based on the fixed value] ---
+    # 这一步主要是为了确保 DDP 的 broadcast 机制本身是通的
+    if world_size > 1:
+        try:
+            dist.broadcast(huber_delta_tensor, src=0) # Rank 0 广播这个固定值
+        except Exception as e_dist:
+            logging.critical(f"Rank {rank}: Critical error during fixed Huber delta broadcast! Error: {e_dist}.")
+            if world_size > 1: dist.barrier()
+            sys.exit(f"Rank {rank} exiting due to DDP broadcast failure even with fixed delta.")
+            
+    huber_delta = huber_delta_tensor.item() # 所有 rank 都会得到 fixed_delta_value
+    logging.info(f"Rank {rank}: Using HuberLoss with (potentially broadcasted fixed) delta: {huber_delta:.4f}")
+    
+    # # 创建一个 tensor 来持有 delta 值，所有进程都创建它。Rank 0 会更新它。
+    # # 使用 .to(device) 确保 tensor 在正确的 GPU 上，以便 NCCL broadcast
+    # huber_delta_tensor = torch.tensor(1.0, dtype=torch.float32, device=device) # Default value
+    
+    # if rank == 0:
+    #     logging.info("Rank 0: Preparing to calculate HuberLoss delta...")
+    #     rest_lengths_for_delta_calc = []
+    #     actual_samples_for_delta_calc = 0
+        
+    #     # Rank 0 进行数据扫描以收集 rest_len
+    #     # 注意: 为了计算 delta，Rank 0 可能需要访问整个数据集的元信息或样本。
+    #     # 这里的 EmbeddingDataset 实例是为了统计，不是 DDP 训练用的那个。
+    #     # 如果这个初始化本身很慢，可以考虑优化这部分数据的收集方式。
+    #     try:
+    #         # 临时的、仅 Rank 0 使用的数据集实例，用于统计
+    #         # 传递 rank=0, world_size=1 确保它看到所有文件（如果其内部逻辑支持）
+    #         # 或者，如果 EmbeddingDataset 的默认行为就是加载所有，则不需要 rank/world_size 参数
+    #         temp_stat_dataset = EmbeddingDataset(args['feature_dir']) # rank=0, world_size=1 (或者不传，取决于实现)
+            
+    #         if len(temp_stat_dataset) > 0:
+    #             # 考虑减少样本量以加快速度，例如10万或20万，而不是50万
+    #             sample_size_for_delta = min(len(temp_stat_dataset), args.get('delta_calc_sample_size', 200000)) 
+    #             indices = random.sample(range(len(temp_stat_dataset)), sample_size_for_delta)
+    #             actual_samples_for_delta_calc = len(indices)
+                
+    #             logging.info(f"Rank 0: Scanning {actual_samples_for_delta_calc} random samples for Huber delta calculation...")
+    #             for i in tqdm(indices, desc="Scanning rest_len for Huber delta", disable=(rank!=0)): # tqdm 只在 rank 0 显示
+    #                 sample = temp_stat_dataset[i]
+    #                 if sample and 'remaining' in sample and np.isfinite(sample['remaining']):
+    #                     rest_lengths_for_delta_calc.append(sample['remaining'])
+    #         else:
+    #             logging.warning("Rank 0: Temporary dataset for delta calculation is empty.")
+            
+    #         del temp_stat_dataset # 及时释放资源
+    #     except Exception as e:
+    #         logging.error(f"Rank 0: Error during data collection for Huber delta: {e}. Using default delta.")
+    #         rest_lengths_for_delta_calc = [] #确保列表为空，使用默认delta
+        
+    #     logging.info(f"Rank 0: Collected {len(rest_lengths_for_delta_calc)} valid 'rest_len' values from {actual_samples_for_delta_calc} scanned samples.")
+        
+    #     # Rank 0 计算 delta
+    #     calculated_huber_delta = 1.0 # Default
+    #     if rest_lengths_for_delta_calc:
+    #         try:
+    #             rest_arr = np.array(rest_lengths_for_delta_calc, dtype=np.float32)
+    #             if len(rest_arr) == 0: raise ValueError("Empty array after collecting finite rest_lengths for delta.")
+                
+    #             rest_mean = np.nanmean(rest_arr)
+    #             if np.isnan(rest_mean): raise ValueError("Mean of rest_lengths is NaN for delta calculation.")
+                
+    #             abs_diff = np.abs(rest_arr - rest_mean)
+    #             c_delta = np.nanquantile(abs_diff, 0.9) # 0.9 quantile of absolute differences
+                
+    #             if not (np.isnan(c_delta) or c_delta <= 1e-6): # Ensure delta is a sensible positive value
+    #                 calculated_huber_delta = float(c_delta)
+    #             else:
+    #                 logging.warning(f"Rank 0: Calculated delta was problematic ({c_delta}). Using default delta 1.0.")
+    #         except Exception as e:
+    #             logging.warning(f"Rank 0: Failed to calculate HuberLoss delta from collected data (Reason: {str(e)}). Using default delta 1.0.")
+        
+    #     huber_delta_tensor[0] = calculated_huber_delta # 更新 Rank 0 上的 tensor 值
+    #     logging.info(f"Rank 0: Calculated Huber delta: {huber_delta_tensor.item():.4f}")
+    
+    # # --- 3. 同步 Huber Delta 值 ---
+    # if world_size > 1:
+    #     # 所有进程参与广播，将 Rank 0 的 huber_delta_tensor 值广播给所有其他进程
+    #     dist.broadcast(huber_delta_tensor, src=0)
+    
+    # # 所有进程从其本地的 (可能已更新的) tensor 中获取 float 类型的 delta 值
+    # huber_delta = huber_delta_tensor.item() 
+    # # 确保所有rank都记录它们将使用的delta
+    # logging.info(f"Rank {rank}: Using HuberLoss with delta: {huber_delta:.4f}")
+    
     # --- 4. 初始化用于训练的数据集和 DataLoader (DDP 感知) ---
     dataset = EmbeddingDataset(args['feature_dir'], rank=rank, world_size=world_size)
     
@@ -460,7 +479,7 @@ def train_worker(rank, world_size, args):
             dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
         )
         dataloader_shuffle = False
-
+    
     dataloader = DataLoader(
         dataset, 
         batch_size=args['batch_size_per_gpu'], 
