@@ -135,8 +135,8 @@ class EmbeddingDataset(Dataset): # Using the robust version from previous iterat
                         logging.warning(f"File {file_path}: 'features' or 'labels' are not numpy arrays. Skipping.")
                         continue
                     if features.ndim == 0 or labels.ndim == 0: 
-                         features = np.atleast_1d(features)
-                         labels = np.atleast_1d(labels)
+                        features = np.atleast_1d(features)
+                        labels = np.atleast_1d(labels)
 
                     if len(features) == 0: 
                         logging.warning(f"File {file_path} contains empty 'features' array. Skipping.")
@@ -162,37 +162,39 @@ class EmbeddingDataset(Dataset): # Using the robust version from previous iterat
             logging.critical(f"No valid .npz files found in dataset directory {feature_dir}")
             raise RuntimeError(f"Dataset directory {feature_dir} contains no valid .npz files")
         
+        # calculate cumulative samples
         total = 0
         for n_samples_in_file in self.file_sample_counts: # Renamed for clarity
             self.cumulative_samples.append((total, total + n_samples_in_file))
             total += n_samples_in_file
         self.total_samples = total
         if self.rank == 0:
-             logging.info(f"Initialized dataset. Total valid files: {len(self.file_paths)}, Total samples: {self.total_samples}")
+            logging.info(f"Initialized dataset. Total valid files: {len(self.file_paths)}, Total samples: {self.total_samples}")
     
     def __len__(self):
         return self.total_samples
     
-    def _normalize_value(self, value, min_val, max_val, name):
-        if max_val == min_val:
-            norm_val = 0.0 if value == min_val else 0.5 
-            if self.rank == 0 and random.random() < 0.001 : # Log very sparsely for this case
-                 logging.debug(f"Normalization for {name}: min=max={min_val}, value={value}, norm_val={norm_val}")
-        else:
-            norm_val = (value - min_val) / (max_val - min_val)
+    # def _normalize_value(self, value, min_val, max_val, name):
+    #     if max_val == min_val:
+    #         norm_val = 0.0 if value == min_val else 0.5 
+    #         if self.rank == 0 and random.random() < 0.001 : # Log very sparsely for this case
+    #             logging.debug(f"Normalization for {name}: min=max={min_val}, value={value}, norm_val={norm_val}")
+    #     else:
+    #         norm_val = (value - min_val) / (max_val - min_val)
         
-        clipped_val = np.clip(norm_val, 0.0, 1.0)
-        if clipped_val != norm_val and abs(clipped_val - norm_val) > 1e-6 : 
-            if self.rank == 0 and random.random() < 0.01 : # Log 1% of clipping events from rank 0
-                logging.warning(f"Value for {name} ({value}) was clipped after normalization. Original norm: {norm_val:.4f}, clipped: {clipped_val:.4f}. Check MIN/MAX constants for {name}.")
-        return np.float32(clipped_val)
+    #     clipped_val = np.clip(norm_val, 0.0, 1.0)
+    #     if clipped_val != norm_val and abs(clipped_val - norm_val) > 1e-6 : 
+    #         if self.rank == 0 and random.random() < 0.01 : # Log 1% of clipping events from rank 0
+    #             logging.warning(f"Value for {name} ({value}) was clipped after normalization. Original norm: {norm_val:.4f}, clipped: {clipped_val:.4f}. Check MIN/MAX constants for {name}.")
+    #     return np.float32(clipped_val)
 
     def __getitem__(self, idx):
         if not (0 <= idx < self.total_samples):
             # This log can be very verbose if sampler generates out-of-bound idx temporarily before epoch sync
-            # logging.error(f"Index {idx} out of bounds (0, {self.total_samples-1})") 
+            logging.error(f"Index {idx} out of bounds (0, {self.total_samples-1})") 
             return None 
         
+        # get the file index and sample index
         start_list = [cs[0] for cs in self.cumulative_samples]
         file_idx = bisect.bisect_right(start_list, idx) - 1
         
@@ -231,19 +233,29 @@ class EmbeddingDataset(Dataset): # Using the robust version from previous iterat
 
                 params = decode_params(encoded_param)
                 
+                # return {
+                #     'temperature': self._normalize_value(params['temperature'], MIN_TEMP, MAX_TEMP, 'temperature'),
+                #     'top_k': self._normalize_value(params['top_k'], MIN_TOP_K, MAX_TOP_K, 'top_k'),
+                #     'repetition_penalty': self._normalize_value(params['repetition_penalty'], MIN_REP_PENALTY, MAX_REP_PENALTY, 'repetition_penalty'),
+                #     'max_len': self._normalize_value(params['max_new_tokens'], MIN_MAX_NEW_TOKENS, MAX_MAX_NEW_TOKENS, 'max_new_tokens'),
+                #     'seq_pos': self._normalize_value(float(seq_pos), MIN_SEQ_POS, MAX_SEQ_POS, 'seq_pos'), # Ensure seq_pos is float for normalization
+                #     'embedding': embedding.astype(np.float32),
+                #     'remaining': np.float32(rest_len),
+                # }
                 return {
-                    'temperature': self._normalize_value(params['temperature'], MIN_TEMP, MAX_TEMP, 'temperature'),
-                    'top_k': self._normalize_value(params['top_k'], MIN_TOP_K, MAX_TOP_K, 'top_k'),
-                    'repetition_penalty': self._normalize_value(params['repetition_penalty'], MIN_REP_PENALTY, MAX_REP_PENALTY, 'repetition_penalty'),
-                    'max_len': self._normalize_value(params['max_new_tokens'], MIN_MAX_NEW_TOKENS, MAX_MAX_NEW_TOKENS, 'max_new_tokens'),
-                    'seq_pos': self._normalize_value(float(seq_pos), MIN_SEQ_POS, MAX_SEQ_POS, 'seq_pos'), # Ensure seq_pos is float for normalization
+                    'temperature': np.float32((params['temperature'] - 0.1) / 0.8),
+                    'top_k': np.float32(params['top_k'] / 100.0),
+                    'repetition_penalty': np.float32((params['repetition_penalty'] - 1.3) / 0.3),
+                    'max_len': np.float32((params['max_new_tokens'] - 300) / 200.0),  
+                    'seq_pos': np.float32(seq_pos / 4096.0),
                     'embedding': embedding.astype(np.float32),
                     'remaining': np.float32(rest_len),
+                    # 'over_max': np.float32(over_max)
                 }
         except Exception as e:
             # Log less verbosely to avoid flooding logs, maybe sample error logging
             if random.random() < 0.05: # Log 5% of these errors
-                 logging.error(f"Error processing sample: File {self.file_paths[file_idx]}, sample_idx_in_file {sample_idx_in_file}. Error: {str(e)}")
+                logging.error(f"Error processing sample: File {self.file_paths[file_idx]}, sample_idx_in_file {sample_idx_in_file}. Error: {str(e)}")
             return None
 
 class EnhancedMLP(nn.Module): 
@@ -348,12 +360,12 @@ def cleanup_ddp():
 def train_worker(rank, world_size, args):
     current_log_dir = setup_logging(rank, args['log_dir_base'])
     current_save_dir = get_current_save_dir(args['save_dir_base'], current_log_dir)
-
+    
     if world_size > 1:
         setup_ddp(rank, world_size, args['memory_fraction'])
     
     device = rank
-
+    
     dataset = EmbeddingDataset(args['feature_dir'], rank=rank, world_size=world_size)
     
     rest_lengths_for_delta = []
@@ -372,7 +384,7 @@ def train_worker(rank, world_size, args):
                         rest_lengths_for_delta.append(sample['remaining'])
         del temp_stat_dataset
         logging.info(f"Rank 0: Used {actual_samples_for_delta_calc} samples to gather 'rest_len' for Huber delta calculation.") # MODIFICATION
-
+    
     if world_size > 1:
         if rank == 0:
             rest_lengths_tensor = torch.tensor(rest_lengths_for_delta, dtype=torch.float32).cuda(rank)
@@ -384,7 +396,7 @@ def train_worker(rank, world_size, args):
             rest_lengths_tensor = torch.empty(size_tensor.item(), dtype=torch.float32).cuda(rank)
         dist.broadcast(rest_lengths_tensor, src=0)
         rest_lengths_for_delta = rest_lengths_tensor.cpu().tolist()
-
+    
     huber_delta = 1.0 
     if not rest_lengths_for_delta:
         if rank == 0: logging.warning("No valid 'rest_len' data found for HuberLoss delta. Using default delta=1.0.")
@@ -403,7 +415,7 @@ def train_worker(rank, world_size, args):
         except Exception as e:
             if rank == 0: logging.warning(f"Failed to calculate HuberLoss delta (Reason: {str(e)}). Using default delta=1.0.")
     if rank == 0: logging.info(f"Using HuberLoss with delta: {huber_delta:.4f}")
-
+    
     sampler = None
     dataloader_shuffle = True
     if world_size > 1:
@@ -411,7 +423,7 @@ def train_worker(rank, world_size, args):
             dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
         )
         dataloader_shuffle = False
-
+    
     dataloader = DataLoader(
         dataset, batch_size=args['batch_size_per_gpu'], shuffle=dataloader_shuffle,
         num_workers=args['num_workers'], pin_memory=True, 
@@ -446,23 +458,22 @@ def train_worker(rank, world_size, args):
     
     best_loss = float('inf')
     model_save_path_best = current_save_dir / "enhanced_mlp_best.pth"
-
+    
     # MODIFICATION: Counters for empty batch monitoring
     consecutive_empty_batches = 0
-
+    
     for epoch in range(args['epochs']):
         if sampler: sampler.set_epoch(epoch)
         model.train()
         total_loss_epoch_accum = 0.0
         num_optimizer_steps_epoch = 0
         total_empty_batches_in_epoch = 0 # MODIFICATION
-
         data_iterator = dataloader
         if rank == 0:
             data_iterator = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}", unit="batch")
         
         optimizer.zero_grad()
-
+        
         for batch_idx, batch_data in enumerate(data_iterator):
             if not batch_data: 
                 total_empty_batches_in_epoch += 1 # MODIFICATION
@@ -477,14 +488,14 @@ def train_worker(rank, world_size, args):
                 continue
             
             consecutive_empty_batches = 0 # MODIFICATION: Reset if batch is valid
-
+            
             try:
                 input_features = {k: v.to(device, non_blocking=True) for k, v in batch_data.items() if k != 'remaining'}
                 reg_labels = batch_data['remaining'].to(device, non_blocking=True)
             except Exception as e:
                 if rank == 0: logging.error(f"Error moving batch to device: {e}. Skipping batch.")
                 continue
-
+            
             with autocast(enabled=args['use_amp']):
                 reg_pred = model(input_features)
                 loss = reg_criterion(reg_pred, reg_labels)
@@ -492,12 +503,12 @@ def train_worker(rank, world_size, args):
             if loss is None or torch.isnan(loss) or torch.isinf(loss):
                 if rank == 0: logging.warning(f"NaN/Inf loss detected at epoch {epoch+1}, batch {batch_idx}. Skipping grad update for this batch.")
                 continue 
-
+            
             loss_val_for_accum = loss.item() # Store for logging before scaling for grad accum
             loss = loss / args['gradient_accumulation_steps']
             scaler.scale(loss).backward()
             total_loss_epoch_accum += loss_val_for_accum # Accumulate original loss value for averaging
-
+            
             if (batch_idx + 1) % args['gradient_accumulation_steps'] == 0 or (batch_idx + 1) == len(dataloader):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -508,16 +519,16 @@ def train_worker(rank, world_size, args):
                 num_optimizer_steps_epoch +=1
         
         avg_loss_this_rank = total_loss_epoch_accum / len(dataloader) if len(dataloader) > 0 else 0.0 # Average over number of micro-batches processed
-
+        
         if world_size > 1:
             avg_loss_tensor = torch.tensor(avg_loss_this_rank, device=device)
             dist.all_reduce(avg_loss_tensor, op=dist.ReduceOp.AVG)
             avg_loss_epoch_global = avg_loss_tensor.item()
         else:
             avg_loss_epoch_global = avg_loss_this_rank
-
+        
         current_lr = optimizer.param_groups[0]['lr']
-
+        
         if rank == 0:
             logging.info(
                 f"Epoch {epoch+1} Summary: Avg Global Loss (per micro-batch): {avg_loss_epoch_global:.4f} | "
@@ -552,7 +563,7 @@ def train_worker(rank, world_size, args):
             }
             torch.save(checkpoint, checkpoint_path)
             logging.info(f"Checkpoint saved to {checkpoint_path}")
-
+    
     if world_size > 1:
         cleanup_ddp()
     if rank == 0:
@@ -566,7 +577,7 @@ def main_ddp_launcher():
         print("No CUDA GPUs available. Exiting.")
         return
     print(f"Found {world_size} GPUs. Starting DDP training...")
-
+    
     args = {
         'feature_dir': FEATURE_DIR,
         'log_dir_base': LOG_DIR_BASE,
@@ -586,11 +597,11 @@ def main_ddp_launcher():
     
     LOG_DIR_BASE.mkdir(parents=True, exist_ok=True)
     SAVE_DIR_BASE.mkdir(parents=True, exist_ok=True)
-
+    
     mp.spawn(train_worker,
-             args=(world_size, args),
-             nprocs=world_size,
-             join=True)
+            args=(world_size, args),
+            nprocs=world_size,
+            join=True)
 
 if __name__ == "__main__":
     try:
