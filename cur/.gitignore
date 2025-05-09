@@ -9,4 +9,5 @@ training_data/
 ./preview
 
 ./predictors/logs
+./predictors/saved_models/
 ```
