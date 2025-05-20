@@ -163,3 +163,5 @@ cython_debug/
 .DS_Store
 cur/preview/pe/*
 cur/predictors/saved_models/
+cur/predictors/used_prompt_ids.txt
+cur/predictors/length_predictor_eval_results_Meta_Llama_3_70B_20250521_010529.jsonl

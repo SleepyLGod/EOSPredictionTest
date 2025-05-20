@@ -7,7 +7,7 @@ import os
 import random
 import json
 from datetime import timedelta
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score # For R2 score if needed
 import sys # For exiting early
 import logging # For better logging control
@@ -30,13 +30,14 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191
 
 # configurations
 LLM_MODEL_NAME = 'meta-llama/Meta-Llama-3-70B'
-LENGTH_PREDICTOR_PATH = Path("/mnt/data-disk-1/home/cpii.local/ericlo/projects/EOSPredictionTest/cur/predictors/saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
+LENGTH_PREDICTOR_PATH = Path("./saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
 DS_NAME = 'yahma/alpaca-cleaned'
+USED_PROMPT_IDS_FILE = Path("./used_prompt_ids.txt")
 # PROMPT_SOURCE_FILE = './test_prompts.json' # Path to a .json file with prompts, or use a default list
 NUM_TEST_PROMPTS = 100
 SAMPLE_PERCENTAGE = 0.01
 ALPACA_CACHE_DIR = "./.cache/huggingface_datasets_eval_simple" # cache dir for datasets
-OUTPUT_RESULTS_FILE_TEMPLATE = "./length_predictor_eval_results_{llm_name}_{timestamp}.json" # Added timestamp
+OUTPUT_RESULTS_FILE_TEMPLATE = "./length_predictor_eval_results_{llm_name}_{timestamp}.jsonl" # Added timestamp
 DEVICE_LLM = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DEVICE_PREDICTOR = torch.device("cuda:1" if torch.cuda.device_count() > 1 else DEVICE_LLM)
 USE_FLASH_ATTENTION_2 = False # Set to False to disable Flash Attention 2
@@ -53,113 +54,110 @@ DECODING_PARAMS_LIST = [
     {'temperature': 0.7, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
 ]
 
-# def ds_generator():
-#     temp = load_dataset(DS_NAME)
-#     dataset = temp['test']
-#     prompt_template = "{instruction}\n\n{input}"  # template for the prompt
-#     prompts = []
-#     for inst, inp in zip(dataset["instruction"], dataset["input"]):
-#         if inp.strip() == "":  # no input
-#             prompt = inst
-#         else:
-#             prompt = prompt_template.format(instruction=inst, input=inp)
-#         prompts.append(prompt)
-#     # structure the data
-#     data = {
-#         "qa_pairs": [
-#             {"prompt": prompt, "response": output}
-#             for prompt, output in zip(prompts, dataset["output"])
-#         ]
-#     }
-#     ds_len = len(data['qa_pairs']) # 51760
-#     print(f"Total number of QA pairs: {ds_len}")
-#     # TODO
+def load_used_prompt_ids(filepath: Path) -> set:
+    """Loads a set of used prompt IDs from a file (one ID per line)."""
+    used_ids = set()
+    if filepath.exists():
+        try:
+            with open(filepath, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line: # non-empty line
+                        try:
+                            used_ids.add(int(line))
+                        except ValueError:
+                            logger.warning(f"Skipping invalid ID (not an int) in {filepath}: '{line}'")
+            logger.info(f"Loaded {len(used_ids)} used prompt IDs from {filepath}")
+        except Exception as e:
+            logger.error(f"Error loading used prompt IDs from {filepath}: {e}")
+    else:
+        logger.warning(f"Used prompt IDs file not found: {filepath}. No prompts will be excluded based on this file.")
+    return used_ids
 
-def load_prompts_for_evaluation(ds_name: str, sample_percentage: float, num_prompts_limit: int, cache_dir: str = None):
-    """
-    Loads data from the 'train' split of the specified Hugging Face dataset,
-    formats prompts, randomly samples a percentage, limits by num_prompts_limit,
-    and returns a list of prompt dictionaries suitable for evaluation.
-    Each returned dictionary will have: {"id": str, "text": str}
-    """
+
+def load_prompts_for_evaluation(
+    ds_name: str, 
+    sample_percentage: float, 
+    num_prompts_limit: int, 
+    cache_dir: str = None,
+    used_ids_filepath: Path = USED_PROMPT_IDS_FILE
+):
     logger.info(f"Loading dataset: {ds_name} for evaluation prompts...")
+    
+    ids_to_skip = load_used_prompt_ids(used_ids_filepath)
     try:
         temp_hf_dataset = load_dataset(ds_name, cache_dir=cache_dir)
-        dataset_split = temp_hf_dataset['test'] 
-        logger.info(f"Using 'test' split from {ds_name}.")
+        if 'train' not in temp_hf_dataset:
+            logger.error(f"'train' split not found in {ds_name}. Available: {list(temp_hf_dataset.keys())}")
+            return []
+        dataset_split = temp_hf_dataset['train'] 
+        logger.info(f"Using 'train' split from {ds_name}.")
     except Exception as e:
         logger.error(f"Error loading dataset {ds_name}: {e}")
-        logger.error("Please ensure the dataset name is correct and you have internet access / dataset is cached.")
-        return [] # 
+        return []
     prompt_template_with_input = "{instruction}\n\n{input}"
     prompt_template_no_input = "{instruction}"
     
-    all_formatted_prompts = [] # [{"id": ..., "text": ...}, ...]
-    logger.info("Formatting prompts from the dataset...")
-    for i, entry in enumerate(dataset_split):
+    all_formatted_prompts = [] 
+    skipped_due_to_used_id = 0
+    logger.info("Formatting prompts from the dataset and filtering used IDs...")
+    
+    # enumerate(dataset_split): (index, entry)
+    for original_idx, entry in enumerate(dataset_split):
+        if original_idx in ids_to_skip:
+            skipped_due_to_used_id += 1
+            # logger.debug(f"Skipping prompt with original_idx {original_idx} as it was used for training.")
+            continue 
+        
         instruction = entry.get("instruction", "")
         inp_text = entry.get("input", "")
-        # output_text = entry.get("output", "") 
+        
         if not instruction:
-            logger.debug(f"Skipping entry {i} due to empty instruction.")
+            # logger.debug(f"Skipping entry with original_idx {original_idx} due to empty instruction.")
             continue
+        
         if inp_text and inp_text.strip():
             prompt_text = prompt_template_with_input.format(instruction=instruction, input=inp_text)
         else:
             prompt_text = prompt_template_no_input.format(instruction=instruction)
         
-        # each prompt should be a dictionary with "id" and "text"
-        # to avoid conflicts, we can use a safe name for the prompt ID
         safe_ds_name = ds_name.split('/')[-1].replace('-', '_')
-        prompt_id = f"{safe_ds_name}_train_{i}" 
-        all_formatted_prompts.append({"id": prompt_id, "text": prompt_text})
+        prompt_id = f"{safe_ds_name}_train_{original_idx}" 
+        all_formatted_prompts.append({"id": prompt_id, "text": prompt_text, "original_idx": original_idx}) # 可选：保存原始索引
+    if skipped_due_to_used_id > 0:
+        logger.info(f"Skipped {skipped_due_to_used_id} prompts because their original_idx was in the used IDs list.")
     if not all_formatted_prompts:
-        logger.warning(f"No prompts were formatted from dataset {ds_name}. Check dataset content and keys.")
+        logger.warning(f"No prompts remaining after filtering from dataset {ds_name}.")
         return []
     total_prompts_before_sampling = len(all_formatted_prompts)
-    logger.info(f"Total formatted prompts available: {total_prompts_before_sampling}")
-    # --- random sampling ---
-    if sample_percentage >= 1.0 or sample_percentage < 0:
-        logger.warning(f"Sample percentage {sample_percentage*100:.2f}% is out of [0, 100) range. Using all available prompts or limiting by NUM_TEST_PROMPTS.")
+    logger.info(f"Total formatted and available prompts (after filtering used IDs): {total_prompts_before_sampling}")
+    
+    # Sample prompts based on the sample_percentage
+    sampled_prompts = []
+    if not (0 <= sample_percentage <= 1.0):
+        logger.warning(f"Sample percentage {sample_percentage*100:.2f}% is out of [0, 100] range. Using all available prompts or limiting by num_prompts_limit.")
         sampled_prompts = all_formatted_prompts
     elif sample_percentage == 0:
         logger.info("Sample percentage is 0. No prompts will be selected by sampling.")
-        sampled_prompts = []
     else:
-        num_to_sample_float = total_prompts_before_sampling * sample_percentage
-        num_to_sample = int(round(num_to_sample_float))
-        # ensure at least one sample if sample_percentage > 0
-        if num_to_sample == 0 and total_prompts_before_sampling > 0:
-            num_to_sample = 1
-            logger.info(f"Calculated 0 samples from {sample_percentage*100:.2f}%, taking 1 sample instead.")
+        num_to_sample = int(round(total_prompts_before_sampling * sample_percentage))
+        if num_to_sample == 0 and total_prompts_before_sampling > 0: num_to_sample = 1
         
         if num_to_sample >= total_prompts_before_sampling:
-            sampled_prompts = all_formatted_prompts # Use all available prompts
-            logger.info(f"Sample percentage resulted in {num_to_sample} samples, which is >= total available. Using all {total_prompts_before_sampling} prompts.")
+            sampled_prompts = all_formatted_prompts
         else:
-            # 设置随机种子以便采样可复现 (可选, 但推荐用于调试)
-            # random.seed(42) # 如果需要固定采样结果
+            # random.seed(42) # Uncomment for reproducible sampling
             sampled_prompts = random.sample(all_formatted_prompts, num_to_sample)
-            logger.info(f"Randomly sampled {len(sampled_prompts)} prompts ({sample_percentage*100:.2f}% of {total_prompts_before_sampling}).")
-    # --- apply limit if needed ---
+        logger.info(f"Sampled {len(sampled_prompts)} prompts ({sample_percentage*100:.2f}% of {total_prompts_before_sampling}).")
+    final_prompts_for_eval = sampled_prompts
     if num_prompts_limit is not None and len(sampled_prompts) > num_prompts_limit:
-        # 从已采样的结果中再取前 N 个（或者也可以随机再取N个）
-        # 为了简单和可预测性，这里取前 N 个
-        final_prompts_for_eval = sampled_prompts[:num_prompts_limit]
-        logger.info(f"Limited the number of prompts from {len(sampled_prompts)} to {len(final_prompts_for_eval)} due to NUM_TEST_PROMPTS limit ({num_prompts_limit}).")
-    elif not sampled_prompts and total_prompts_before_sampling > 0:
-        logger.warning("Sampling resulted in an empty list, but original prompts were available. This might be due to sample_percentage=0.")
-        final_prompts_for_eval = []
-    else:
-        final_prompts_for_eval = sampled_prompts
+        final_prompts_for_eval = sampled_prompts[:num_prompts_limit] 
+        logger.info(f"Limited prompts from {len(sampled_prompts)} to {len(final_prompts_for_eval)} by num_prompts_limit ({num_prompts_limit}).")
     
-    if not final_prompts_for_eval and total_prompts_before_sampling > 0 :
-        logger.warning("After sampling and limiting, the final prompt list is empty. Check sampling/limiting logic and parameters.")
-    elif final_prompts_for_eval:
+    if final_prompts_for_eval:
         logger.info(f"Final number of prompts selected for evaluation: {len(final_prompts_for_eval)}")
-        # 示例：打印前几个选中的 prompt ID 和文本，用于验证
-        for i, p_info in enumerate(final_prompts_for_eval[:min(3, len(final_prompts_for_eval))]): #最多打印3个
-            logger.debug(f"  Selected Prompt Example {i+1}: ID='{p_info['id']}', Text='{p_info['text'][:80]}...'")
+    else:
+        logger.warning("No prompts selected for evaluation after sampling, filtering, and limiting.")
     return final_prompts_for_eval
 
 def normalize_eval_params(temp, top_k_val, rep_p, max_len_session, current_seq_pos_val):
@@ -289,318 +287,448 @@ def sample_next_token_from_logits(logits, temperature=1.0, top_k=0):
 
 @torch.no_grad() 
 def evaluate_length_predictor():
+    # --- Setup Run Information and Output File ---
     run_timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_results_file = Path(
-        OUTPUT_RESULTS_FILE_TEMPLATE.format(
-            llm_name=LLM_MODEL_NAME.split('/')[-1],
-            timestamp=run_timestamp
-        )
+    # Ensure template uses .jsonl if writing line by line
+    output_results_filename = OUTPUT_RESULTS_FILE_TEMPLATE.format(
+        llm_name=LLM_MODEL_NAME.split('/')[-1].replace('-', '_'), # Make filename safe
+        timestamp=run_timestamp
     )
+    output_results_file = Path(output_results_filename)
     output_results_file.parent.mkdir(parents=True, exist_ok=True)
     
-    logger.info(f"Loading LLM: {LLM_MODEL_NAME} on {DEVICE_LLM}")
-    llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-    if llm_tokenizer.pad_token_id is None:
-        llm_tokenizer.pad_token_id = llm_tokenizer.eos_token_id
-        logger.info(f"Set LLM pad_token_id to eos_token_id: {llm_tokenizer.eos_token_id}")
+    logger.info(f"Evaluation Run ID: {run_timestamp}")
+    logger.info(f"LLM for generation: {LLM_MODEL_NAME} on {DEVICE_LLM}")
+    logger.info(f"Length predictor model path: {LENGTH_PREDICTOR_PATH} on {DEVICE_PREDICTOR}")
+    logger.info(f"Attempting to use Flash Attention 2 for LLM: {USE_FLASH_ATTENTION_2}")
+    logger.info(f"Outputting detailed results (JSONL) to: {output_results_file}")
     
-    # Determine LLM's actual max length
-    llm_model_max_length = getattr(llm_tokenizer, 'model_max_length', None)
-    if llm_model_max_length is None and hasattr(llm_tokenizer, 'tokenizer_config') and 'model_max_length' in llm_tokenizer.tokenizer_config:
-        llm_model_max_length = llm_tokenizer.tokenizer_config['model_max_length']
-    if llm_model_max_length is None and hasattr(llm_model, 'config') and hasattr(llm_model.config, 'max_position_embeddings'):
-        llm_model_max_length = llm_model.config.max_position_embeddings # Fallback
-    if llm_model_max_length is None:
-        llm_model_max_length = 2048 # A conservative default if not found
-        logger.warning(f"Could not determine LLM model_max_length, defaulting to {llm_model_max_length}.")
-    else:
-        logger.info(f"Determined LLM model_max_length: {llm_model_max_length}")
-    
-    # Update MIN_SEQ_POS, MAX_SEQ_POS based on actual LLM capabilities if desired,
-    # but ensure normalization constants are consistent with training.
-    # For this script, we'll assume training constants (MIN_SEQ_POS, MAX_SEQ_POS) are authoritative
-    # for the length predictor's input normalization.
-    # We use llm_model_max_length primarily for input truncation.
-    
-    attn_implementation = "eager"
-    if USE_FLASH_ATTENTION_2:
-        try:
-            import flash_attn
-            if torch.cuda.is_available() and hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
-                attn_implementation = "flash_attention_2"
-                logger.info("Flash Attention 2 will be used for LLM.")
-            else:
-                logger.info("Flash Attention 2 prerequisites not met, falling back to eager for LLM.")
-        except ImportError:
-            logger.info("Flash Attention 2 not installed, falling back to eager for LLM.")
-    else:
-        logger.info("USE_FLASH_ATTENTION_2 is False, using eager attention for LLM.")
-    
+    # --- 1. Load LLM and Tokenizer ---
+    logger.info(f"Loading tokenizer for: {LLM_MODEL_NAME}")
     try:
-        device_map = DEVICE_LLM if DEVICE_LLM.type == 'cuda' else None
-        llm_model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL_NAME,
-            torch_dtype=torch.bfloat16 if DEVICE_LLM.type == 'cuda' and attn_implementation == "flash_attention_2" else torch.float32, # FA2 prefers bfloat16/float16
-            device_map=device_map,
-            attn_implementation=attn_implementation,
-            output_hidden_states=True
-        )
-        if DEVICE_LLM.type == 'cpu' and attn_implementation == "flash_attention_2": # Should not happen if check above is correct
-            llm_model = AutoModelForCausalLM.from_pretrained(LLM_MODEL_NAME, torch_dtype=torch.float32, output_hidden_states=True).to(DEVICE_LLM)
-        elif DEVICE_LLM.type == 'cuda' and not (DEVICE_LLM.index is None or DEVICE_LLM.index == llm_model.device.index) and device_map != "auto": # Check if model is on correct device after device_map
-            # This check is tricky with device_map. For single GPU, device_map=DEVICE_LLM should handle it.
-            pass
+        llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME, trust_remote_code=True)
     except Exception as e:
-        logger.error(f"Error loading LLM (attn: {attn_implementation}): {e}. Trying with eager attention and float32.")
+        logger.critical(f"Failed to load LLM tokenizer for {LLM_MODEL_NAME}: {e}")
+        return
+    
+    if llm_tokenizer.pad_token_id is None:
+        if llm_tokenizer.eos_token_id is not None:
+            llm_tokenizer.pad_token_id = llm_tokenizer.eos_token_id
+            logger.info(f"Set LLM pad_token_id to eos_token_id: {llm_tokenizer.eos_token_id}")
+        else:
+            # Add a new pad token if no eos token either (less common for decoders)
+            llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            logger.info(f"Added a new pad token '[PAD]' to LLM tokenizer.")
+    
+    # --- Robustly determine llm_model_max_length ---
+    llm_model_max_len = None
+    try:
+        llm_config_obj = AutoConfig.from_pretrained(LLM_MODEL_NAME, trust_remote_code=True)
+        llm_model_max_len = getattr(llm_config_obj, 'max_position_embeddings', None)
+    except Exception as e_conf:
+        logger.warning(f"Could not load AutoConfig for {LLM_MODEL_NAME} to get max_position_embeddings ({e_conf}).")
+
+    if llm_model_max_len is None:
+        llm_model_max_len = getattr(llm_tokenizer, 'model_max_length', None)
+    if llm_model_max_len is None:
+        llm_model_max_len = llm_tokenizer.tokenizer_config.get('model_max_length', None)
+        
+    SAFE_LLM_MAX_LENGTH = 8192 # Default for Llama 3 like models
+    # KNOWN_MODEL_MAX_LENGTHS could be a dict for specific model overrides if needed.
+    
+    if not isinstance(llm_model_max_len, int) or llm_model_max_len <= 0:
+        logger.warning(f"Could not reliably determine model_max_length from tokenizer/config (found: {llm_model_max_len}).")
+        llm_model_max_len = KNOWN_MODEL_MAX_LENGTHS.get(LLM_MODEL_NAME, SAFE_LLM_MAX_LENGTH) if 'KNOWN_MODEL_MAX_LENGTHS' in globals() else SAFE_LLM_MAX_LENGTH
+        logger.warning(f"Setting LLM max_length to: {llm_model_max_len}")
+    elif llm_model_max_len > 32768: # Arbitrary upper cap for sanity
+        logger.warning(f"Determined model_max_length {llm_model_max_len} seems excessively large. Capping at 32768 for safety during tokenization.")
+        llm_model_max_len = 32768
+        
+    logger.info(f"Using effective LLM model_max_length for input truncation: {llm_model_max_len}")
+    # Note: The global constant MAX_SEQ_POS (e.g., 8191) is used for normalizing the 'seq_pos' feature
+    # for the length predictor and should be consistent with its training.
+    # llm_model_max_len is for LLM's own input sequence length handling.
+    logger.info(f"Note: Global MAX_SEQ_POS for length predictor normalization is {MAX_SEQ_POS}")
+    
+    # --- Configure Attention Implementation for LLM ---
+    attn_implementation = "eager" # Default
+    if USE_FLASH_ATTENTION_2 and torch.cuda.is_available():
+        try:
+            import flash_attn 
+            # Check if PyTorch version supports SDPA (scaled_dot_product_attention)
+            if hasattr(torch.nn.functional, 'scaled_dot_product_attention'):
+                attn_implementation = "flash_attention_2"
+                logger.info("Attempting to use Flash Attention 2 for LLM.")
+            else:
+                logger.info("Current PyTorch version does not support scaled_dot_product_attention needed for Flash Attention 2.")
+        except ImportError:
+            logger.info("flash_attn library not installed. Cannot use 'flash_attention_2'.")
+    else:
+        logger.info(f"Not using Flash Attention 2 (USE_FLASH_ATTENTION_2: {USE_FLASH_ATTENTION_2}, CUDA available: {torch.cuda.is_available()}). Using 'eager' attention for LLM.")
+    
+    # --- Load LLM ---
+    try:
+        # llm_device_map_arg = DEVICE_LLM if DEVICE_LLM.type == 'cuda' else None
+        llm_device_map_arg = "auto"
+        # For very large models on a single GPU, quantization is often necessary.
+        # If `LOAD_IN_4BIT` (from your previous iteration) is True, add quantization_config here.
+        # For this version, I'm assuming no explicit quantization config for simplicity based on current code.
+        
+        llm_torch_dtype = torch.float32 # Default
+        if DEVICE_LLM.type == 'cuda':
+            llm_torch_dtype = torch.bfloat16 if attn_implementation == "flash_attention_2" else torch.float16
+            # If not using FA2, float16 might be a good compromise for speed/memory on CUDA for 70B if bf16 not fully stable or desired.
+            # Llama models often default to bfloat16 or float16 on CUDA.
+        
         llm_model = AutoModelForCausalLM.from_pretrained(
             LLM_MODEL_NAME,
-            torch_dtype=torch.float32, # Fallback dtype
-            device_map=DEVICE_LLM if DEVICE_LLM.type == 'cuda' else None,
-            attn_implementation="eager",
-            output_hidden_states=True
-        ).to(DEVICE_LLM) # Ensure .to() if device_map is None (e.g. CPU)
+            torch_dtype=llm_torch_dtype,
+            device_map=llm_device_map_arg, # Handles multi-GPU if "auto" or sharding if single GPU memory is tight (with accelerate)
+            attn_implementation=attn_implementation,
+            output_hidden_states=True, # Required for embeddings
+            trust_remote_code=True 
+        )
+        if llm_device_map_arg is None and DEVICE_LLM.type != 'cpu': # e.g., for MPS or if device_map was None for CPU
+            llm_model = llm_model.to(DEVICE_LLM)
+        logger.info(f"LLM loaded on its device(s) (model.device: {llm_model.device}) with {attn_implementation} attention.")
+    except Exception as e_load_llm:
+        logger.error(f"Error loading LLM (attn: {attn_implementation}, device_map: {llm_device_map_arg}): {e_load_llm}.")
+        logger.error("Attempting fallback: eager attention, float32, and explicit .to(DEVICE_LLM).")
+        try:
+            llm_model = AutoModelForCausalLM.from_pretrained(
+                LLM_MODEL_NAME,
+                torch_dtype=torch.float32,
+                attn_implementation="eager",
+                output_hidden_states=True,
+                trust_remote_code=True
+            ).to(DEVICE_LLM)
+            logger.info(f"LLM loaded (fallback) successfully on {llm_model.device} with eager attention.")
+        except Exception as e_fallback_llm:
+            logger.critical(f"CRITICAL: Fallback LLM loading also failed: {e_fallback_llm}")
+            return # Cannot proceed without LLM
     llm_model.eval()
     
+    # --- 2. Load Length Predictor Model ---
     logger.info(f"Loading Length Predictor from: {LENGTH_PREDICTOR_PATH} on {DEVICE_PREDICTOR}")
     length_predictor = EnhancedMLP(HIDDEN_SIZE).to(DEVICE_PREDICTOR)
     try:
-        # ... (model loading logic, same as your previous robust version, ensure to use logger.info/error) ...
         state_dict = torch.load(LENGTH_PREDICTOR_PATH, map_location=DEVICE_PREDICTOR)
         from collections import OrderedDict
         new_state_dict = OrderedDict()
+        # Check if the state_dict is from a DDP model (keys start with 'module.')
         is_ddp_model = any(key.startswith('module.') for key in state_dict.keys())
-        
         if is_ddp_model:
-            logger.info("Detected DDP model state_dict for length predictor. Removing 'module.' prefix.")
-            for k, v in state_dict.items(): new_state_dict[k[7:]] = v
+            logger.debug("Detected DDP model state_dict for length predictor. Removing 'module.' prefix.")
+            for k, v in state_dict.items(): new_state_dict[k[7:]] = v # Remove 'module.'
             length_predictor.load_state_dict(new_state_dict)
         else:
-            logger.info("Detected non-DDP model state_dict for length predictor.")
             length_predictor.load_state_dict(state_dict)
-            
+        logger.info("Length predictor loaded successfully.")
     except FileNotFoundError:
-        logger.error(f"ERROR: Length predictor model file not found at {LENGTH_PREDICTOR_PATH}")
+        logger.critical(f"CRITICAL: Length predictor model file not found at {LENGTH_PREDICTOR_PATH}")
         return
-    except Exception as e:
-        logger.error(f"Error loading length predictor state_dict: {e}. Trying as checkpoint.")
+    except Exception as e_load_pred: 
+        logger.error(f"Error loading length predictor state_dict: {e_load_pred}. Trying to load as checkpoint.")
         try:
             checkpoint = torch.load(LENGTH_PREDICTOR_PATH, map_location=DEVICE_PREDICTOR)
             state_dict = checkpoint['model_state_dict']
-            # ... (rest of checkpoint loading logic with DDP prefix removal) ...
             new_state_dict = OrderedDict()
-            is_ddp_model = any(key.startswith('module.') for key in state_dict.keys())
-            if is_ddp_model:
-                for k, v in state_dict.items(): new_state_dict[k[7:]] = v
+            is_ddp_model_chk = any(key.startswith('module.') for key in state_dict.keys())
+            if is_ddp_model_chk:
+                for k_chk, v_chk in state_dict.items(): new_state_dict[k_chk[7:]] = v_chk
                 length_predictor.load_state_dict(new_state_dict)
             else:
                 length_predictor.load_state_dict(state_dict)
-            logger.info(f"Loaded length predictor from checkpoint (epoch {checkpoint.get('epoch', 'N/A')}).")
-        except Exception as e_chk:
-            logger.error(f"ERROR: Could not load length predictor: {e_chk}")
+            logger.info(f"Length predictor loaded from checkpoint (epoch {checkpoint.get('epoch', 'N/A')}).")
+        except Exception as e_chk_load:
+            logger.critical(f"CRITICAL: Could not load length predictor from file or checkpoint: {e_chk_load}")
             return
-    length_predictor.eval()
+    length_predictor.eval() # Set predictor to evaluation mode
     
-    # prompts_data = load_prompts(PROMPT_SOURCE_FILE, NUM_TEST_PROMPTS)
-    # if not prompts_data:
-    #     logger.error("No prompts to evaluate. Exiting.")
-    #     return
-        
-    # all_results_data = [] # Renamed to avoid conflict
-    
+    # --- 3. Load Prompts ---
     prompts_data = load_prompts_for_evaluation(
         ds_name=DS_NAME,
         sample_percentage=SAMPLE_PERCENTAGE,
         num_prompts_limit=NUM_TEST_PROMPTS,
-        cache_dir=ALPACA_CACHE_DIR
+        cache_dir=ALPACA_CACHE_DIR,
+        used_ids_filepath=USED_PROMPT_IDS_FILE
     )
     if not prompts_data:
-        logger.critical("Failed to load any prompts for evaluation. The evaluation cannot proceed.")
-        return # or sys.exit(1)
-    logger.info(f"Successfully loaded {len(prompts_data)} prompts. Starting evaluation loop...")
-    all_results_data = []
+        logger.critical("No prompts loaded for evaluation. Exiting.")
+        return
     
-    for prompt_info in tqdm(prompts_data, desc="Processing Prompts"):
-        prompt_text = prompt_info["text"]
-        prompt_id = prompt_info.get("id", f"p_{random.randint(1000,9999)}")
-        
-        for dec_params_idx, dec_params in enumerate(DECODING_PARAMS_LIST):
-            current_max_new_tokens_session = dec_params['max_new_tokens'] # Max for this session
+    logger.info(f"Starting evaluation with {len(prompts_data)} prompts and {len(DECODING_PARAMS_LIST)} decoding parameter sets.")
+    
+    # --- 4. Evaluation Loop - Results Written Line-by-Line ---
+    # Open file once to write all results as JSON Lines
+    with open(output_results_file, 'w') as f_out:
+        for prompt_idx, prompt_info in enumerate(tqdm(prompts_data, desc="Processing Prompts")):
+            prompt_text = prompt_info["text"]
+            prompt_id = prompt_info["id"]
             
-            # Tokenize prompt, ensuring space for generation within LLM's limits
-            # Truncate from the left if prompt is too long
-            inputs = llm_tokenizer(
-                prompt_text, 
-                return_tensors="pt", 
-                truncation=True, 
-                max_length=min(llm_model_max_length - 5, llm_model_max_length - current_max_new_tokens_session), # Ensure prompt+max_new fits
-                padding=False # No padding needed for single sequence generation
-            ).to(DEVICE_LLM)
-            
-            current_input_ids = inputs.input_ids # Will be appended with generated tokens
-            original_prompt_len = current_input_ids.shape[1]
-            
-            if original_prompt_len == 0:
-                logger.warning(f"Prompt '{prompt_id}' resulted in empty input_ids after tokenization/truncation, skipping.")
-                continue
-            # --- Store results for this specific (prompt, decoding_param_set) run ---
-            session_generated_token_ids = []
-            session_step_predictions = []
-            session_eos_encountered = False
-            actual_total_generated_steps = 0 # Actual steps taken before EOS or max_new_tokens
-            # KV cache for LLM generation
-            past_key_values = None
-            # Note: This loop iterates for `current_max_new_tokens_session` steps *at most*.
-            # It's simulating token-by-token generation.
-            for step in range(current_max_new_tokens_session):
-                current_full_sequence_len = original_prompt_len + step # Length *before* generating token for this step
+            for dec_params_idx, dec_params in enumerate(DECODING_PARAMS_LIST):
+                current_max_new_tokens_session = dec_params['max_new_tokens']
                 
-                # Input for LLM: only the last token if past_key_values are used
-                llm_step_input_ids = current_input_ids if step == 0 else current_input_ids[:, -1:]
+                # Validate if current_max_new_tokens_session is within normalization range for 'max_len_session'
+                if not (MIN_MAX_NEW_TOKENS <= current_max_new_tokens_session <= MAX_MAX_NEW_TOKENS):
+                    logger.warning(
+                        f"For prompt {prompt_id}, params_idx {dec_params_idx}: "
+                        f"Session max_new_tokens {current_max_new_tokens_session} is outside "
+                        f"defined normalization range [{MIN_MAX_NEW_TOKENS}, {MAX_MAX_NEW_TOKENS}]. "
+                        "Length predictor's 'max_len' feature will be clipped during normalization, affecting prediction."
+                    )
                 
-                llm_outputs = llm_model(
-                    input_ids=llm_step_input_ids,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    output_hidden_states=True,
-                    return_dict=True
-                )
+                # Calculate max length for tokenizer, ensuring space for generated tokens
+                # Subtract a small buffer (e.g., 5-10 tokens) for special tokens or edge cases.
+                buffer_tokens = 5 
+                max_prompt_len_for_tokenizer = llm_model_max_len - current_max_new_tokens_session - buffer_tokens
                 
-                last_token_embedding = llm_outputs.hidden_states[-1][:, -1, :].to(DEVICE_PREDICTOR) # [1, HIDDEN_SIZE]
+                if max_prompt_len_for_tokenizer <= 0:
+                    logger.warning(
+                        f"Prompt {prompt_id} with max_new_tokens {current_max_new_tokens_session} (LLM max: {llm_model_max_len}) "
+                        f"results in non-positive max_prompt_len_for_tokenizer ({max_prompt_len_for_tokenizer}). "
+                        "Skipping this parameter set for this prompt."
+                    )
+                    continue # Skip this (prompt, dec_param) combination
                 
-                # Normalize parameters for length predictor input
-                norm_params = normalize_eval_params(
-                    dec_params['temperature'], dec_params['top_k'], dec_params['repetition_penalty'],
-                    current_max_new_tokens_session, # This is the max_new_tokens for the *session*
-                    current_full_sequence_len # current position in sequence (length of input to LLM)
-                )
+                # Tokenize the prompt
+                inputs = llm_tokenizer(
+                    prompt_text, 
+                    return_tensors="pt", 
+                    truncation=True, 
+                    max_length=max_prompt_len_for_tokenizer, 
+                    padding=False # Not needed for single sequence generation
+                ).to(DEVICE_LLM)
                 
-                predictor_input = {
-                    'embedding': last_token_embedding.to(torch.float32),
-                    'temperature': torch.tensor([norm_params['temperature']], device=DEVICE_PREDICTOR, dtype=torch.float32),
-                    'top_k': torch.tensor([norm_params['top_k']], device=DEVICE_PREDICTOR, dtype=torch.float32),
-                    'repetition_penalty': torch.tensor([norm_params['repetition_penalty']], device=DEVICE_PREDICTOR, dtype=torch.float32),
-                    'max_len': torch.tensor([norm_params['max_len']], device=DEVICE_PREDICTOR, dtype=torch.float32), # Normalized max_len_session
-                    'seq_pos': torch.tensor([norm_params['seq_pos']], device=DEVICE_PREDICTOR, dtype=torch.float32),
+                current_input_ids = inputs.input_ids
+                original_prompt_len_tokenized = current_input_ids.shape[1]
+                
+                if original_prompt_len_tokenized == 0:
+                    logger.warning(f"Prompt '{prompt_id}' (params_idx {dec_params_idx}) resulted in empty input_ids after tokenization/truncation. Skipping.")
+                    continue
+                
+                # --- Store results for this specific (prompt, decoding_param_set) run ---
+                session_generated_token_ids = []
+                session_step_predictions = []
+                session_eos_encountered = False
+                actual_total_generated_steps = 0 # How many tokens were actually generated
+                past_key_values = None # KV cache
+                
+                # --- Decoding Loop (token by token) ---
+                for step in range(current_max_new_tokens_session):
+                    current_full_sequence_len = original_prompt_len_tokenized + step # Length *before* generating token for this step
+                    
+                    # Safety break if sequence approaches LLM's absolute max length
+                    if current_full_sequence_len >= llm_model_max_len -1: # Leave one spot for next token
+                        logger.warning(
+                            f"Sequence length {current_full_sequence_len} approaching LLM max {llm_model_max_len} "
+                            f"for prompt {prompt_id}. Stopping generation for this (prompt, params) early."
+                        )
+                        break
+                    
+                    # Prepare input for LLM (only the last token if past_key_values are available)
+                    llm_step_input_ids = current_input_ids if step == 0 else current_input_ids[:, -1:]
+                    
+                    try:
+                        llm_outputs = llm_model(
+                            input_ids=llm_step_input_ids, 
+                            past_key_values=past_key_values,
+                            use_cache=True, 
+                            output_hidden_states=True, 
+                            return_dict=True
+                        )
+                    except Exception as e_llm_fwd:
+                        logger.error(f"Error during LLM forward pass for prompt {prompt_id}, step {step}: {e_llm_fwd}")
+                        session_eos_encountered = True # Mark as ended to stop further processing for this combo
+                        break # Stop generation for this (prompt, params) combination
+                    
+                    # Get embedding for the length predictor (from the last token of the input to LLM)
+                    last_token_embedding = llm_outputs.hidden_states[-1][:, -1, :].to(DEVICE_PREDICTOR) # Shape: [1, HIDDEN_SIZE]
+                    
+                    # Normalize parameters for the length predictor
+                    norm_params = normalize_eval_params(
+                        dec_params['temperature'], dec_params['top_k'], dec_params['repetition_penalty'],
+                        current_max_new_tokens_session, # The 'max_len' context for the predictor
+                        current_full_sequence_len     # The current position
+                    )
+                    
+                    predictor_input = {
+                        'embedding': last_token_embedding.to(torch.float32), # Ensure float32
+                        'temperature': torch.tensor([norm_params['temperature']], device=DEVICE_PREDICTOR, dtype=torch.float32),
+                        'top_k': torch.tensor([norm_params['top_k']], device=DEVICE_PREDICTOR, dtype=torch.float32),
+                        'repetition_penalty': torch.tensor([norm_params['repetition_penalty']], device=DEVICE_PREDICTOR, dtype=torch.float32),
+                        'max_len': torch.tensor([norm_params['max_len']], device=DEVICE_PREDICTOR, dtype=torch.float32), # Normalized session max_len
+                        'seq_pos': torch.tensor([norm_params['seq_pos']], device=DEVICE_PREDICTOR, dtype=torch.float32),
+                    }
+                    
+                    # --- Predict remaining length and measure latency ---
+                    pred_start_time = time.perf_counter()
+                    if DEVICE_PREDICTOR.type == 'cuda': torch.cuda.synchronize(DEVICE_PREDICTOR)
+                    predicted_rest_len_tensor = length_predictor(predictor_input)
+                    if DEVICE_PREDICTOR.type == 'cuda': torch.cuda.synchronize(DEVICE_PREDICTOR)
+                    pred_end_time = time.perf_counter()
+                    
+                    latency_ms = (pred_end_time - pred_start_time) * 1000
+                    predicted_rest_len = predicted_rest_len_tensor.item() # Scalar value
+                    
+                    # --- LLM generates the next token for the ongoing sequence ---
+                    logits_for_next_token = llm_outputs.logits[:, -1, :] # Logits for the token to be generated now
+                    past_key_values = llm_outputs.past_key_values # Update KV cache
+                    
+                    # Apply repetition penalty manually to logits (consistent with your data generation)
+                    if dec_params['repetition_penalty'] != 1.0 and session_generated_token_ids:
+                        # Convert to tensor only if not empty for efficient indexing
+                        unique_generated_ids_tensor = torch.tensor(list(set(session_generated_token_ids)), 
+                                                                    device=logits_for_next_token.device, dtype=torch.long)
+                        if unique_generated_ids_tensor.numel() > 0:
+                            logits_for_next_token[0, unique_generated_ids_tensor] /= dec_params['repetition_penalty']
+                    
+                    # Sample the next token from LLM's logits
+                    next_token_id_tensor = sample_next_token_from_logits(
+                        logits_for_next_token, 
+                        dec_params['temperature'], 
+                        dec_params['top_k']
+                    )
+                    next_token_id_item = next_token_id_tensor.item()
+                    
+                    session_generated_token_ids.append(next_token_id_item)
+                    actual_total_generated_steps = step + 1 # Update how many tokens have been generated so far
+                    
+                    # Store results for this step (actual_rest_len will be post-calculated)
+                    session_step_predictions.append({
+                        "step_index": step, # 0-indexed step number
+                        "current_full_sequence_len_for_pred": current_full_sequence_len,
+                        "predicted_rest_len": predicted_rest_len,
+                        "actual_rest_len": -1, # Placeholder, will be filled after full generation for this (prompt,params)
+                        "latency_ms": latency_ms,
+                        "generated_token_id_at_this_step": next_token_id_item,
+                    })
+                    
+                    # Append the newly generated token to current_input_ids for the next LLM step
+                    current_input_ids = torch.cat([current_input_ids, next_token_id_tensor.to(current_input_ids.device)], dim=-1)
+                    
+                    # Check for EOS token
+                    if next_token_id_item == llm_tokenizer.eos_token_id:
+                        session_eos_encountered = True
+                        logger.debug(f"EOS token encountered at step {step} for prompt {prompt_id}, params_idx {dec_params_idx}")
+                        break # Break from the inner token generation loop
+                
+                # --- Post-process to calculate correct actual_rest_len for each step in this session ---
+                for step_pred_info in session_step_predictions:
+                    # actual_total_generated_steps is the number of tokens generated (1-indexed)
+                    # step_pred_info["step_index"] is the 0-indexed step number when prediction was made
+                    # The prediction at step_index `s` is for the tokens from `s+1` onwards.
+                    # True remaining tokens from this point = actual_total_generated_steps - (s+1)
+                    step_pred_info["actual_rest_len"] = max(0, actual_total_generated_steps - (step_pred_info["step_index"] + 1))
+                    step_pred_info["prediction_error"] = step_pred_info["predicted_rest_len"] - step_pred_info["actual_rest_len"]
+                
+                # --- Prepare the result dictionary for this (prompt, dec_params) combination ---
+                current_session_result_dict = {
+                    "prompt_id": prompt_id,
+                    "prompt_tokenized_len": original_prompt_len_tokenized, # Length of the (potentially truncated) prompt fed to LLM
+                    "decoding_params_idx": dec_params_idx,
+                    "decoding_params": dec_params,
+                    "actual_generated_steps": actual_total_generated_steps, # How many tokens were actually generated
+                    "eos_encountered_in_session": session_eos_encountered,
+                    # "generated_token_ids_in_session": session_generated_token_ids, # Can be very long, uncomment if needed for debug
+                    "step_predictions": session_step_predictions # List of per-step prediction details
                 }
                 
-                start_time = time.perf_counter()
-                if DEVICE_PREDICTOR.type == 'cuda': torch.cuda.synchronize(DEVICE_PREDICTOR)
-                predicted_rest_len_tensor = length_predictor(predictor_input)
-                if DEVICE_PREDICTOR.type == 'cuda': torch.cuda.synchronize(DEVICE_PREDICTOR)
-                end_time = time.perf_counter()
+                # --- Write this session's result as a JSON Line ---
+                f_out.write(json.dumps(current_session_result_dict) + '\n')
                 
-                latency_ms = (end_time - start_time) * 1000
-                predicted_rest_len = predicted_rest_len_tensor.item()
+                # Optional: Flush frequently for long runs to see intermediate results, but impacts performance.
+                # if (dec_params_idx + 1) % 5 == 0: f_out.flush() 
                 
-                # LLM generates next token (for continuing the simulation)
-                logits_for_next_token = llm_outputs.logits[:, -1, :] # Logits for the token *to be generated now*
-                past_key_values = llm_outputs.past_key_values
-                
-                # Apply repetition penalty to logits_for_next_token if needed (as in your data gen)
-                if dec_params['repetition_penalty'] != 1.0:
-                    for token_id_in_generated_sequence in set(session_generated_token_ids): # Penalize already generated tokens
-                        logits_for_next_token[0, token_id_in_generated_sequence] /= dec_params['repetition_penalty']
-                
-                next_token_id_tensor = sample_next_token_from_logits(
-                    logits_for_next_token, 
-                    dec_params['temperature'], 
-                    dec_params['top_k']
-                )
-                next_token_id_item = next_token_id_tensor.item()
-                session_generated_token_ids.append(next_token_id_item)
-                actual_total_generated_steps = step + 1
-                
-                # Store step result (actual_rest_len will be post-calculated)
-                session_step_predictions.append({
-                    "step_index": step, # 0 to max_new_tokens-1
-                    "current_full_sequence_len_for_pred": current_full_sequence_len,
-                    "predicted_rest_len": predicted_rest_len,
-                    "actual_rest_len": -1, # Placeholder, to be filled after full generation
-                    "latency_ms": latency_ms,
-                    "generated_token_id_at_this_step": next_token_id_item,
-                })
-                
-                current_input_ids = torch.cat([current_input_ids, next_token_id_tensor], dim=-1)
-                
-                if next_token_id_item == llm_tokenizer.eos_token_id:
-                    session_eos_encountered = True
-                    logger.debug(f"EOS token encountered at step {step} for prompt {prompt_id}, params {dec_params_idx}")
-                    break 
-            
-            # Post-process to calculate correct actual_rest_len for each step
-            for step_pred_info in session_step_predictions:
-                # actual_total_generated_steps is the number of tokens generated (1-indexed)
-                # step_pred_info["step_index"] is the 0-indexed step number when prediction was made
-                # The prediction at step_index `s` is for the tokens from `s+1` onwards.
-                # Total tokens to be generated from this point = actual_total_generated_steps - (s+1)
-                step_pred_info["actual_rest_len"] = max(0, actual_total_generated_steps - (step_pred_info["step_index"] + 1))
-                step_pred_info["prediction_error"] = step_pred_info["predicted_rest_len"] - step_pred_info["actual_rest_len"]
-            
-            all_results_data.append({
-                "prompt_id": prompt_id,
-                "prompt_text_truncated": llm_tokenizer.decode(inputs.input_ids[0]), # Log the (potentially truncated) prompt fed to LLM
-                "decoding_params_idx": dec_params_idx,
-                "decoding_params": dec_params,
-                "original_prompt_len_after_tokenization": original_prompt_len,
-                "actual_generated_steps": actual_total_generated_steps,
-                "eos_encountered_in_session": session_eos_encountered,
-                "generated_token_ids_in_session": session_generated_token_ids,
-                "step_predictions": session_step_predictions
-            })
-            
-            del past_key_values
-            if DEVICE_LLM.type == 'cuda': torch.cuda.empty_cache()
+                # --- Clean up GPU memory for the next iteration ---
+                del past_key_values, llm_outputs, last_token_embedding, predictor_input, predicted_rest_len_tensor, logits_for_next_token
+                if DEVICE_LLM.type == 'cuda':
+                    try:
+                        # Set current device to DEVICE_LLM before emptying cache
+                        with torch.cuda.device(DEVICE_LLM):
+                            torch.cuda.empty_cache()
+                        # logger.debug(f"Cache emptied for DEVICE_LLM: {DEVICE_LLM}")
+                    except Exception as e_cache_llm:
+                        logger.warning(f"Could not empty cache for DEVICE_LLM ({DEVICE_LLM}): {e_cache_llm}")
+
+                if DEVICE_PREDICTOR.type == 'cuda' and DEVICE_PREDICTOR != DEVICE_LLM:
+                    try:
+                        # Set current device to DEVICE_PREDICTOR before emptying cache
+                        with torch.cuda.device(DEVICE_PREDICTOR):
+                            torch.cuda.empty_cache()
+                        # logger.debug(f"Cache emptied for DEVICE_PREDICTOR: {DEVICE_PREDICTOR}")
+                    except Exception as e_cache_pred:
+                        logger.warning(f"Could not empty cache for DEVICE_PREDICTOR ({DEVICE_PREDICTOR}): {e_cache_pred}")
+            # End of dec_params loop
+        # End of prompts_data loop
+    # End of file writing context
     
-    # Save all detailed results
-    with open(output_results_file, 'w') as f:
-        json.dump(all_results_data, f, indent=2)
-    logger.info(f"\nDetailed evaluation results saved to: {output_results_file}")
+    logger.info(f"\nDetailed evaluation results saved line-by-line to: {output_results_file}")
     
-    # --- Aggregate Statistics ---
-    logger.info("\n--- Aggregate Statistics ---")
-    all_prediction_errors = []
-    all_latencies = []
-    for res_group in all_results_data:
-        for step_res in res_group["step_predictions"]:
-            all_prediction_errors.append(step_res["prediction_error"])
-            all_latencies.append(step_res["latency_ms"])
+    # --- 5. Aggregate Statistics from the saved JSONL file ---
+    logger.info(f"\n--- Aggregating Statistics from {output_results_file} ---")
+    all_prediction_errors_agg = []
+    all_latencies_agg = []
     
-    if all_prediction_errors:
-        all_prediction_errors = np.array(all_prediction_errors)
-        mae = np.mean(np.abs(all_prediction_errors))
-        mse = np.mean(all_prediction_errors**2)
+    if output_results_file.exists() and output_results_file.stat().st_size > 0:
+        with open(output_results_file, 'r') as f_in:
+            for line_idx, line in enumerate(f_in):
+                try:
+                    res_group = json.loads(line) # Each line is a JSON object for one (prompt, dec_params) run
+                    if "step_predictions" in res_group and isinstance(res_group["step_predictions"], list):
+                        for step_res in res_group["step_predictions"]:
+                            if "prediction_error" in step_res:
+                                all_prediction_errors_agg.append(step_res["prediction_error"])
+                            if "latency_ms" in step_res:
+                                all_latencies_agg.append(step_res["latency_ms"])
+                except json.JSONDecodeError:
+                    logger.warning(f"Skipping invalid JSON line {line_idx+1} in {output_results_file}")
+                    continue
+    else:
+        logger.warning(f"Results file {output_results_file} is empty or does not exist. Cannot aggregate statistics.")
+    
+    # --- Print Aggregate Statistics ---
+    if all_prediction_errors_agg:
+        all_prediction_errors_np = np.array(all_prediction_errors_agg)
+        mae = np.mean(np.abs(all_prediction_errors_np))
+        mse = np.mean(all_prediction_errors_np**2)
         rmse = np.sqrt(mse)
-        bias = np.mean(all_prediction_errors)
-        
-        logger.info(f"Overall Prediction MAE: {mae:.2f} tokens")
-        logger.info(f"Overall Prediction RMSE: {rmse:.2f} tokens")
-        logger.info(f"Overall Prediction Bias (Pred - Actual): {bias:.2f} tokens")
+        bias = np.mean(all_prediction_errors_np) # Average error (Pred - Actual)
+        logger.info(f"Overall Prediction MAE (from file): {mae:.2f} tokens")
+        logger.info(f"Overall Prediction RMSE (from file): {rmse:.2f} tokens")
+        logger.info(f"Overall Prediction Bias (Pred - Actual) (from file): {bias:.2f} tokens")
+        logger.info(f"Number of prediction data points analyzed: {len(all_prediction_errors_np)}")
     else:
-        logger.info("No prediction errors recorded to aggregate.")
+        logger.info("No valid prediction errors found in results file to aggregate.")
     
-    if all_latencies:
-        all_latencies = np.array(all_latencies)
-        logger.info(f"\nPredictor Average Latency: {np.mean(all_latencies):.2f} ms")
-        logger.info(f"Predictor Median Latency: {np.median(all_latencies):.2f} ms")
-        logger.info(f"Predictor P90 Latency: {np.percentile(all_latencies, 90):.2f} ms")
-        logger.info(f"Predictor P95 Latency: {np.percentile(all_latencies, 95):.2f} ms")
-        logger.info(f"Predictor P99 Latency: {np.percentile(all_latencies, 99):.2f} ms")
+    if all_latencies_agg:
+        all_latencies_np = np.array(all_latencies_agg)
+        logger.info(f"Predictor Average Latency (from file): {np.mean(all_latencies_np):.2f} ms")
+        logger.info(f"Predictor Median Latency (from file): {np.median(all_latencies_np):.2f} ms")
+        logger.info(f"Predictor P90 Latency (from file): {np.percentile(all_latencies_np, 90):.2f} ms")
+        logger.info(f"Predictor P95 Latency (from file): {np.percentile(all_latencies_np, 95):.2f} ms")
+        logger.info(f"Predictor P99 Latency (from file): {np.percentile(all_latencies_np, 99):.2f} ms")
+        logger.info(f"Number of latency data points analyzed: {len(all_latencies_np)}")
     else:
-        logger.info("No latencies recorded to aggregate.")
-    logger.info("--------------------------")
+        logger.info("No valid latencies found in results file to aggregate.")
+    logger.info("--- Evaluation Complete ---")
 
 
 if __name__ == "__main__":
+    # --- Environment Setup for PyTorch (Optional, if facing fragmentation OOM) ---
+    # prev_alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
+    # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # logger.info(f"Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (was: {prev_alloc_conf})")
+    
     # --- Path Checks ---
-    if "your_run_timestamp" in str(LENGTH_PREDICTOR_PATH) or \
-    not LENGTH_PREDICTOR_PATH.exists():
-        logger.error(f"LENGTH_PREDICTOR_PATH is a placeholder or does not exist: {LENGTH_PREDICTOR_PATH}")
-        logger.error("Please update it to the actual path of your trained .pth file.")
+    if not LENGTH_PREDICTOR_PATH.exists() or \
+        ("your_run_timestamp" in str(LENGTH_PREDICTOR_PATH) or "your_specific_run_timestamp" in str(LENGTH_PREDICTOR_PATH)): # More general placeholder check
+        logger.critical(f"CRITICAL ERROR: LENGTH_PREDICTOR_PATH is a placeholder or does not exist: {LENGTH_PREDICTOR_PATH}")
+        logger.critical("Please update it to the actual path of your trained .pth file.")
         sys.exit(1) # Exit if critical path is not set
     
-    # Optional: Check for prompt file if specified
-    # if PROMPT_SOURCE_FILE and not Path(PROMPT_SOURCE_FILE).exists():
-    #     logger.warning(f"PROMPT_SOURCE_FILE specified but not found: {PROMPT_SOURCE_FILE}. Using default prompts.")
-    #     PROMPT_SOURCE_FILE = None # Fallback to default
+    # Create eval_output directory if it doesn't exist for result files
+    eval_output_dir = Path("./eval_output") # Assuming template puts files here
+    eval_output_dir.mkdir(parents=True, exist_ok=True)
     
     evaluate_length_predictor()
