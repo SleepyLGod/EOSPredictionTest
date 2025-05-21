@@ -31,12 +31,16 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191
 # configurations
 LLM_MODEL_NAME = 'meta-llama/Meta-Llama-3-70B'
 LENGTH_PREDICTOR_PATH = Path("./saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
-DS_NAME = 'yahma/alpaca-cleaned'
+DS_CHOICE = 1
+DS_NAME = 'yahma/alpaca-cleaned' # 0
+DS_NAME_ALPACA_EVAL = 'tatsu-lab/alpaca_eval' # 1
+DS_NAME_DOLLY = 'databricks/dolly-v2-12k' # 2
 USED_PROMPT_IDS_FILE = Path("./used_prompt_ids.txt")
 # PROMPT_SOURCE_FILE = './test_prompts.json' # Path to a .json file with prompts, or use a default list
 NUM_TEST_PROMPTS = 100
 SAMPLE_PERCENTAGE = 0.01
 ALPACA_CACHE_DIR = "./.cache/huggingface_datasets_eval_simple" # cache dir for datasets
+EVAL_CACHE_DIR = "./.cache/huggingface_datasets_eval_extra"
 OUTPUT_RESULTS_FILE_TEMPLATE = "./length_predictor_eval_results_{llm_name}_{timestamp}.jsonl" # Added timestamp
 DEVICE_LLM = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DEVICE_PREDICTOR = torch.device("cuda:1" if torch.cuda.device_count() > 1 else DEVICE_LLM)
@@ -158,6 +162,162 @@ def load_prompts_for_evaluation(
         logger.info(f"Final number of prompts selected for evaluation: {len(final_prompts_for_eval)}")
     else:
         logger.warning("No prompts selected for evaluation after sampling, filtering, and limiting.")
+    return final_prompts_for_eval
+
+def load_alpaca_eval_prompts(
+    sample_percentage: float, 
+    num_prompts_limit: int, 
+    cache_dir: str = None,
+    used_ids_set: set = None
+):
+    """
+    Loads prompts from tatsu-lab/alpaca_eval ('eval' split).
+    The 'instruction' field is used as the prompt text.
+    'dataset' field can be used to create a more specific ID if needed.
+    """
+    ds_name = 'tatsu-lab/alpaca_eval'
+    logger.info(f"Loading dataset: {ds_name} for evaluation prompts...")
+    if used_ids_set is None:
+        used_ids_set = set()
+        
+    try:
+        temp_hf_dataset = load_dataset(ds_name, "alpaca_eval", cache_dir=cache_dir) # 指定子集名称
+        if 'eval' not in temp_hf_dataset:
+            logger.error(f"'eval' split not found in {ds_name} (subset 'alpaca_eval'). Available: {list(temp_hf_dataset.keys())}")
+            return []
+        dataset_split = temp_hf_dataset['eval']
+        logger.info(f"Using 'eval' split from {ds_name}.")
+    except Exception as e:
+        logger.error(f"Error loading dataset {ds_name}: {e}")
+        return []
+    
+    all_formatted_prompts = []
+    skipped_due_to_used_id = 0
+    logger.info("Formatting prompts from alpaca_eval dataset and filtering used IDs...")
+    
+    for original_idx, entry in enumerate(dataset_split):
+        if original_idx in used_ids_set: # assume used_ids_set is a set of original_idx
+            skipped_due_to_used_id += 1
+            continue
+        
+        instruction = entry.get("instruction", "")
+        if not instruction:
+            logger.debug(f"Skipping entry with original_idx {original_idx} from alpaca_eval due to empty instruction.")
+            continue
+        
+        prompt_text = instruction # directly use instruction as prompt text
+        
+        # ID could be based on dataset name and original index
+        source_dataset_field = entry.get("dataset", "unknown_source")
+        prompt_id = f"alpaca_eval_{source_dataset_field}_{original_idx}"
+        all_formatted_prompts.append({"id": prompt_id, "text": prompt_text, "original_idx": original_idx})
+    
+    if skipped_due_to_used_id > 0:
+        logger.info(f"Skipped {skipped_due_to_used_id} prompts from alpaca_eval (already used).")
+    if not all_formatted_prompts:
+        logger.warning("No prompts remaining after filtering from alpaca_eval.")
+        return []
+    
+    total_prompts_before_sampling = len(all_formatted_prompts)
+    logger.info(f"Total formatted and available prompts from alpaca_eval (after filtering): {total_prompts_before_sampling}")
+    
+    sampled_prompts = []
+    if not (0 <= sample_percentage <= 1.0):
+        logger.warning(f"alpaca_eval: Sample percentage {sample_percentage*100:.2f}% out of range. Using all or limit.")
+        sampled_prompts = all_formatted_prompts
+    elif sample_percentage == 0: logger.info("alpaca_eval: Sample percentage is 0.")
+    else:
+        num_to_sample = int(round(total_prompts_before_sampling * sample_percentage))
+        if num_to_sample == 0 and total_prompts_before_sampling > 0: num_to_sample = 1
+        if num_to_sample >= total_prompts_before_sampling: sampled_prompts = all_formatted_prompts
+        else: sampled_prompts = random.sample(all_formatted_prompts, num_to_sample)
+        logger.info(f"alpaca_eval: Sampled {len(sampled_prompts)} prompts.")
+    
+    final_prompts_for_eval = sampled_prompts
+    if num_prompts_limit is not None and len(sampled_prompts) > num_prompts_limit:
+        final_prompts_for_eval = sampled_prompts[:num_prompts_limit]
+        logger.info(f"alpaca_eval: Limited prompts to {len(final_prompts_for_eval)} by num_prompts_limit.")
+    
+    if final_prompts_for_eval: logger.info(f"alpaca_eval: Final prompts for evaluation: {len(final_prompts_for_eval)}")
+    else: logger.warning("alpaca_eval: No prompts selected after sampling/limiting.")
+    return final_prompts_for_eval
+
+
+def load_dolly_v2_prompts(
+    sample_percentage: float, 
+    num_prompts_limit: int, 
+    cache_dir: str = None,
+    used_ids_set: set = None # 可选
+):
+    """
+    Loads prompts from databricks/dolly-v2-12k ('train' split).
+    Combines 'instruction' and 'context' (if present) to form the prompt.
+    'category' can be used for ID or filtering.
+    """
+    ds_name = 'databricks/dolly-v2-12k'
+    logger.info(f"Loading dataset: {ds_name} for evaluation prompts...")
+    if used_ids_set is None:
+        used_ids_set = set()
+    
+    try:
+        temp_hf_dataset = load_dataset(ds_name, cache_dir=cache_dir)
+        if 'train' not in temp_hf_dataset:
+            logger.error(f"'train' split not found in {ds_name}. Available: {list(temp_hf_dataset.keys())}")
+            return []
+        dataset_split = temp_hf_dataset['train']
+        logger.info(f"Using 'train' split from {ds_name}.")
+    except Exception as e:
+        logger.error(f"Error loading dataset {ds_name}: {e}")
+        return []
+    
+    all_formatted_prompts = []
+    skipped_due_to_used_id = 0
+    logger.info("Formatting prompts from dolly-v2-12k dataset and filtering used IDs...")
+    for original_idx, entry in enumerate(dataset_split):
+        if original_idx in used_ids_set:
+            skipped_due_to_used_id += 1
+            continue
+        instruction = entry.get("instruction", "")
+        context = entry.get("context", "") # Dolly has a 'context' field
+        category = entry.get("category", "unknown_category")
+        if not instruction:
+            logger.debug(f"Skipping entry with original_idx {original_idx} from dolly due to empty instruction.")
+            continue
+        
+        if context and context.strip():
+            # Example: combine context and instruction
+            prompt_text = f"Context: {context}\n\nInstruction: {instruction}"
+            # Or, you might choose to only use instruction if context is too long, or based on category
+        else:
+            prompt_text = instruction
+        
+        prompt_id = f"dolly_v2_{category}_{original_idx}"
+        all_formatted_prompts.append({"id": prompt_id, "text": prompt_text, "original_idx": original_idx})
+    if skipped_due_to_used_id > 0:
+        logger.info(f"Skipped {skipped_due_to_used_id} prompts from dolly-v2 (already used).")
+    if not all_formatted_prompts:
+        logger.warning("No prompts remaining after filtering from dolly-v2.")
+        return []
+    total_prompts_before_sampling = len(all_formatted_prompts)
+    logger.info(f"Total formatted and available prompts from dolly-v2 (after filtering): {total_prompts_before_sampling}")
+    sampled_prompts = [] # Placeholder for actual sampling logic
+    if not (0 <= sample_percentage <= 1.0):
+        logger.warning(f"dolly: Sample percentage {sample_percentage*100:.2f}% out of range. Using all or limit.")
+        sampled_prompts = all_formatted_prompts
+    elif sample_percentage == 0: logger.info("dolly: Sample percentage is 0.")
+    else:
+        num_to_sample = int(round(total_prompts_before_sampling * sample_percentage))
+        if num_to_sample == 0 and total_prompts_before_sampling > 0: num_to_sample = 1
+        if num_to_sample >= total_prompts_before_sampling: sampled_prompts = all_formatted_prompts
+        else: sampled_prompts = random.sample(all_formatted_prompts, num_to_sample)
+        logger.info(f"dolly: Sampled {len(sampled_prompts)} prompts.")
+    final_prompts_for_eval = sampled_prompts
+    if num_prompts_limit is not None and len(sampled_prompts) > num_prompts_limit:
+        final_prompts_for_eval = sampled_prompts[:num_prompts_limit]
+        logger.info(f"dolly: Limited prompts to {len(final_prompts_for_eval)} by num_prompts_limit.")
+    
+    if final_prompts_for_eval: logger.info(f"dolly: Final prompts for evaluation: {len(final_prompts_for_eval)}")
+    else: logger.warning("dolly: No prompts selected after sampling/limiting.")
     return final_prompts_for_eval
 
 def normalize_eval_params(temp, top_k_val, rep_p, max_len_session, current_seq_pos_val):
@@ -446,16 +606,36 @@ def evaluate_length_predictor():
     length_predictor.eval() # Set predictor to evaluation mode
     
     # --- 3. Load Prompts ---
-    prompts_data = load_prompts_for_evaluation(
-        ds_name=DS_NAME,
-        sample_percentage=SAMPLE_PERCENTAGE,
-        num_prompts_limit=NUM_TEST_PROMPTS,
-        cache_dir=ALPACA_CACHE_DIR,
-        used_ids_filepath=USED_PROMPT_IDS_FILE
-    )
+    prompts_data = []
+    
+    if DS_CHOICE == 0: # "alpaca_clean"
+        prompts_data = load_prompts_for_evaluation(
+            ds_name=DS_NAME,
+            sample_percentage=SAMPLE_PERCENTAGE,
+            num_prompts_limit=NUM_TEST_PROMPTS,
+            cache_dir=ALPACA_CACHE_DIR,
+            used_ids_filepath=USED_PROMPT_IDS_FILE
+        )
+    elif DS_CHOICE == 1: # "alpaca_eval"
+        prompts_data = load_alpaca_eval_prompts(
+            sample_percentage=SAMPLE_PERCENTAGE,
+            num_prompts_limit=NUM_TEST_PROMPTS,
+            cache_dir=EVAL_CACHE_DIR,
+            used_ids_set=None
+        )
+    elif DS_CHOICE == 2: # "dolly_v2"
+        prompts_data = load_dolly_v2_prompts(
+            sample_percentage=SAMPLE_PERCENTAGE,
+            num_prompts_limit=NUM_TEST_PROMPTS,
+            cache_dir=EVAL_CACHE_DIR,
+            used_ids_set=None
+        )
+    else:
+        logger.error(f"Invalid dataset choice: {DS_CHOICE}. Must be 0 (alpaca_clean), 1 (alpaca_eval), or 2 (dolly_v2).")
+    
     if not prompts_data:
-        logger.critical("No prompts loaded for evaluation. Exiting.")
-        return
+        logger.critical("Failed to load any prompts for evaluation. Exiting.")
+        sys.exit(1)
     
     logger.info(f"Starting evaluation with {len(prompts_data)} prompts and {len(DECODING_PARAMS_LIST)} decoding parameter sets.")
     
