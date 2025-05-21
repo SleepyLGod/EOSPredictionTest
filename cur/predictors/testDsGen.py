@@ -36,7 +36,7 @@ def extract_and_save_used_ids(feature_dir: Path, output_file: Path):
     if used_qa_ids:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, 'w') as f:
-            for qa_id in sorted(list(used_qa_ids)): #排序后写入，方便查看
+            for qa_id in sorted(list(used_qa_ids)):
                 f.write(str(qa_id) + '\n')
         logger.info(f"Successfully saved {len(used_qa_ids)} used QA IDs to {output_file}")
     else:

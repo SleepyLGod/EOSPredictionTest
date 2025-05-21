@@ -31,10 +31,10 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191
 # configurations
 LLM_MODEL_NAME = 'meta-llama/Meta-Llama-3-70B'
 LENGTH_PREDICTOR_PATH = Path("./saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
-DS_CHOICE = 1
+DS_CHOICE = 2
 DS_NAME = 'yahma/alpaca-cleaned' # 0
 DS_NAME_ALPACA_EVAL = 'tatsu-lab/alpaca_eval' # 1
-DS_NAME_DOLLY = 'databricks/dolly-v2-12k' # 2
+DS_NAME_DOLLY = 'databricks/databricks-dolly-15k' # 2
 USED_PROMPT_IDS_FILE = Path("./used_prompt_ids.txt")
 # PROMPT_SOURCE_FILE = './test_prompts.json' # Path to a .json file with prompts, or use a default list
 NUM_TEST_PROMPTS = 100
@@ -175,7 +175,7 @@ def load_alpaca_eval_prompts(
     The 'instruction' field is used as the prompt text.
     'dataset' field can be used to create a more specific ID if needed.
     """
-    ds_name = 'tatsu-lab/alpaca_eval'
+    ds_name = DS_NAME_ALPACA_EVAL
     logger.info(f"Loading dataset: {ds_name} for evaluation prompts...")
     if used_ids_set is None:
         used_ids_set = set()
@@ -254,7 +254,7 @@ def load_dolly_v2_prompts(
     Combines 'instruction' and 'context' (if present) to form the prompt.
     'category' can be used for ID or filtering.
     """
-    ds_name = 'databricks/dolly-v2-12k'
+    ds_name = DS_NAME_DOLLY
     logger.info(f"Loading dataset: {ds_name} for evaluation prompts...")
     if used_ids_set is None:
         used_ids_set = set()
