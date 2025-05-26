@@ -1,17 +1,19 @@
-import torch
-import numpy as np
-from pathlib import Path
-from tqdm import tqdm
-import time
 import os
-import random
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+import sys # For exiting early
+import time
 import json
+import torch
+import random
+import logging # For better logging control
+import itertools
+import numpy as np
+from tqdm import tqdm
+from pathlib import Path
 from datetime import timedelta
+from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score # For R2 score if needed
-import sys # For exiting early
-import logging # For better logging control
-from datasets import load_dataset
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -31,13 +33,13 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191
 # configurations
 LLM_MODEL_NAME = 'meta-llama/Meta-Llama-3-70B'
 LENGTH_PREDICTOR_PATH = Path("./saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
-DS_CHOICE = 2
+DS_CHOICE = 0
 DS_NAME = 'yahma/alpaca-cleaned' # 0
 DS_NAME_ALPACA_EVAL = 'tatsu-lab/alpaca_eval' # 1
 DS_NAME_DOLLY = 'databricks/databricks-dolly-15k' # 2
 USED_PROMPT_IDS_FILE = Path("./used_prompt_ids.txt")
 # PROMPT_SOURCE_FILE = './test_prompts.json' # Path to a .json file with prompts, or use a default list
-NUM_TEST_PROMPTS = 100
+NUM_TEST_PROMPTS = 50
 SAMPLE_PERCENTAGE = 0.01
 ALPACA_CACHE_DIR = "./.cache/huggingface_datasets_eval_simple" # cache dir for datasets
 EVAL_CACHE_DIR = "./.cache/huggingface_datasets_eval_extra"
@@ -48,15 +50,28 @@ USE_FLASH_ATTENTION_2 = False # Set to False to disable Flash Attention 2
 
 # Decoding parameters to test
 # IMPORTANT: Ensure these values are within the MIN_... and MAX_... ranges defined above for normalization.
-DECODING_PARAMS_LIST = [
-    {'temperature': 0.1, 'top_k': 1, 'repetition_penalty': 1.3, 'max_new_tokens': 300},
-    {'temperature': 0.5, 'top_k': 100, 'repetition_penalty': 1.3, 'max_new_tokens': 300},
-    {'temperature': 0.9, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 500}, # Added another example
-    {'temperature': 0.7, 'top_k': 50, 'repetition_penalty': 1.5, 'max_new_tokens': 400},
-    {'temperature': 0.9, 'top_k': 10, 'repetition_penalty': 1.4, 'max_new_tokens': 300},
-    {'temperature': 0.9, 'top_k': 50, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
-    {'temperature': 0.7, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
-]
+new_decoding_params = []
+temperatures_to_test = [0.1, 0.3, 0.5, 0.7, 0.9]
+top_k_values_to_test = [1, 10, 50, 100]
+repetition_penalties_to_test = [1.3, 1.5, 1.6]
+max_new_tokens_values_to_test = [300, 400, 500] # Renamed for clarity
+
+all_param_combinations = list(itertools.product(
+    temperatures_to_test,
+    top_k_values_to_test,
+    repetition_penalties_to_test,
+    max_new_tokens_values_to_test
+))
+
+DECODING_PARAMS_LIST = []
+for combo in all_param_combinations:
+    param_set = {
+        'temperature': combo[0],
+        'top_k': combo[1],
+        'repetition_penalty': combo[2],
+        'max_new_tokens': combo[3]
+    }
+    DECODING_PARAMS_LIST.append(param_set)
 
 def load_used_prompt_ids(filepath: Path) -> set:
     """Loads a set of used prompt IDs from a file (one ID per line)."""
