@@ -33,7 +33,7 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191
 # configurations
 LLM_MODEL_NAME = 'meta-llama/Meta-Llama-3-70B'
 LENGTH_PREDICTOR_PATH = Path("./saved_models/20250509_003641/enhanced_mlp_best.pth") # Update this to your actual path
-DS_CHOICE = 2
+DS_CHOICE = 1
 DS_NAME = 'yahma/alpaca-cleaned' # 0
 DS_NAME_ALPACA_EVAL = 'tatsu-lab/alpaca_eval' # 1
 DS_NAME_DOLLY = 'databricks/databricks-dolly-15k' # 2
