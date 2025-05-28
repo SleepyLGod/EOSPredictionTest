@@ -166,3 +166,4 @@ cur/predictors/saved_models/
 cur/predictors/used_prompt_ids.txt
 cur/predictors/*.jsonl
 cur/predictors/results/
+cur/predictors/logs/

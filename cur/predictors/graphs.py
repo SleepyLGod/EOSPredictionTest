@@ -13,7 +13,7 @@ logger_analysis = logging.getLogger("analysis_script")
 # --- Configurations ---
 # RESULTS_JSONL_FILE = Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250521_010529.jsonl") 
 # RESULTS_JSONL_FILE = Path("length_predictor_eval_results_Meta_Llama_3_70B_20250521_140235.jsonl")
-RESULTS_JSONL_FILE = Path("length_predictor_eval_results_Meta_Llama_3_70B_20250521_142634.jsonl")
+RESULTS_JSONL_FILE = Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250521_142634.jsonl")
 FIGURES_OUTPUT_DIR = Path("./results/databricks/")
 FIGURES_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MIN_MAX_NEW_TOKENS, MAX_MAX_NEW_TOKENS = 300, 500
