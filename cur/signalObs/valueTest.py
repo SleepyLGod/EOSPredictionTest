@@ -1,0 +1,215 @@
+import json
+import torch
+import os
+import math
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.nn import functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM, utils
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
+
+utils.logging.set_verbosity_error()  # Suppress standard warnings
+
+# Configuration variables
+models = [
+        'meta-llama/Llama-3.2-1B', # Llama-3.2-1B (16 layers 32 heads)
+        'meta-llama/Meta-Llama-3-8B', # Meta-Llama-3-8B
+        'meta-llama/Meta-Llama-3-70B', # Meta-Llama-3-70B
+        'meta-llama/Meta-Llama-3-8B-Instruct', # Meta-Llama-3-8B-Instruct (the only model TRAIL tests with)
+        'EleutherAI/gpt-j-6b', # GPT-J 
+        'meta-llama/Llama-2-13b-chat-hf', # Llama-2, fine-tuned
+        'EleutherAI/gpt-neox-20b', # GPT-NeoX
+        ]
+
+datasets = {
+    1: '../data/dataset_alpaca.json',
+    2: '../data/datasetSimplified_alpaca.json',
+    3: '../data/dataset_lmsys-chat-1m.json'
+}
+
+CACHE_DIR = "/research/d2/gds/hdlu24/cache_model"
+
+# Parameters
+max_new_tokens = 300
+temperature = 1  # Lower temperature for more deterministic output
+top_k = 1  # Increase top_k for more diverse candidates
+repetition_penalty = 1.3  # Increase repetition penalty to reduce repetition
+
+# Load tokenizer and model
+print(
+    "Choose the model to test:\n"
+    " 1. Llama-3.2-1B\n"
+    " 2. Meta-Llama-3-8B\n"
+    " 3. Meta-Llama-3-70B\n"
+    " 4. Meta-Llama-3-8B-Instruct\n"
+    " 5. GPT-J\n"
+    " 6. Llama-2\n"
+    " 7. GPT-NeoX"
+)
+model_choice = int(input("Enter the number corresponding to the model: "))
+if model_choice < 1 or model_choice > len(models):
+    raise ValueError("Invalid model choice. Please enter a number between 1 and 7.")
+model_name = models[model_choice - 1]
+
+print(
+    "Choose the dataset to use:\n"
+    " 1. Alpaca\n"
+    " 2. Simplified Alpaca\n"
+    " 3. LMSYS Chat 1M"
+)
+dataset_choice = int(input("Enter the number corresponding to the dataset: "))
+if dataset_choice < 1 or dataset_choice > len(datasets):
+    raise ValueError("Invalid dataset choice. Please enter a number between 1 and 3.")
+dataset_path = datasets[dataset_choice]
+
+# Load the dataset
+with open(dataset_path, 'r') as f:
+    data = json.load(f)
+
+# Choose a prompt
+prompt_id = int(input(f"Enter the prompt ID (0 to {len(data['qa_pairs']) - 1}): "))
+if prompt_id < 0 or prompt_id >= len(data['qa_pairs']):
+    raise ValueError(f"Invalid prompt ID. Please enter a number between 0 and {len(data['qa_pairs']) - 1}.")
+prompt = data['qa_pairs'][prompt_id]['prompt']
+print(f"Selected prompt: {prompt}")
+
+# Load the model
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
+model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=CACHE_DIR, device_map="auto", attn_implementation="eager")
+# model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir="/research/d2/gds/hdlu24/cache_model", attn_implementation="eager").to(device)
+
+eos_token_id = tokenizer.eos_token_id
+eos_flag=0
+
+# Tokenize the prompt
+inputs = tokenizer(prompt, return_tensors='pt')
+input_ids = inputs.input_ids
+attention_mask = inputs.attention_mask
+input_len = input_ids.shape[1]
+
+# Initialize variables
+original_input_length = input_ids.shape[1]
+num_layers = model.config.num_hidden_layers
+num_heads = model.config.num_attention_heads
+
+# Create directory to store attention scores
+scores_dir = f'../.attention_scores/prompt_full_{prompt_id}/'
+os.makedirs(scores_dir, exist_ok=True)
+
+# Initialize lists to collect attention scores
+attention_scores_all = {
+    (layer_idx, head_idx): [] for layer_idx in range(num_layers) for head_idx in range(num_heads)
+}
+
+# Initialize list to collect generated tokens
+generated_tokens = []
+previous_token = None  # To track repetitive tokens
+
+# Function for top-k sampling
+def sample_top_k(logits, k, temperature):
+    logits = logits / temperature
+    top_k_logits, top_k_indices = torch.topk(logits, k)
+    probs = F.softmax(top_k_logits, dim=-1)
+    next_token = torch.multinomial(probs, num_samples=1).squeeze()
+    return top_k_indices[0, next_token]
+
+torch.cuda.empty_cache()
+
+# Token generation loop
+step = 0
+while step < max_new_tokens:
+    with torch.no_grad():
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        outputs = model(input_ids, attention_mask=attention_mask, output_attentions=True)
+    logits = outputs.logits[:, -1, :]
+    
+    # Apply repetition penalty
+    for token in generated_tokens:
+        logits[0, token] /= repetition_penalty  # Adjust for batch dimension
+    
+    # Perform top-k sampling
+    next_token = sample_top_k(logits, k=top_k, temperature=temperature)
+    
+    if next_token.item() == eos_token_id:
+        eos_flag=1
+        print("********************************")
+        print("Generation ended with EOS token.")
+        print("********************************")
+        break
+    
+    # Avoid immediate repetitive tokens
+    if next_token.item() == previous_token:
+        logits[0, next_token.item()] = -float('inf')
+        next_token = sample_top_k(logits, k=top_k, temperature=temperature)
+    previous_token = next_token.item()
+    
+    # Collect attention scores for the last token in the sequence for each layer and head
+    for layer_idx in range(num_layers):
+        attentions = outputs.attentions[layer_idx]
+        attention_scores = attentions[0, :, -1, :].detach().cpu().numpy()  # Shape: (num_heads, seq_len)
+        for head_idx in range(num_heads):
+            seq_len = original_input_length + step + 1
+            scores = attention_scores[head_idx, :seq_len]  # Get scores up to current step
+            attention_scores_all[(layer_idx, head_idx)].append(scores)
+    
+    # Append the next token to input_ids and attention_mask
+    input_ids = torch.cat([input_ids, next_token.view(1, 1)], dim=1)
+    attention_mask = torch.cat([attention_mask, torch.ones(1, 1).to(device)], dim=1)
+    generated_tokens.append(next_token.item())
+    step += 1
+
+# Calculate the total number of tokens generated
+total_tokens = len(generated_tokens)
+# Decode and print the generated output
+generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+# Ensure the output directory exists
+output_dir = f'../scores/{model_name}/'
+os.makedirs(output_dir, exist_ok=True)
+
+# Create a .txt file to save the prompt, generated output, and alert information
+txt_file_path = os.path.join(output_dir, f'ds_{dataset_choice}_p_{prompt_id}_gen_info.txt')
+with open(txt_file_path, 'w') as f:
+    f.write(f"Prompt: {prompt}\n")
+    f.write(f"Generated output: {generated_text}\n")
+    f.write(f"Total tokens generated: {total_tokens}\n")
+    if eos_flag == 1:
+        f.write("Generation ended with EOS token.\n")
+
+# Process attention alerts
+alerts = {}
+for (layer, head), scores_list in attention_scores_all.items():
+    alert_entries = []
+    for step_idx, scores in enumerate(scores_list):
+        if not scores.size:
+            continue
+        N = len(scores)
+        tail_size = math.ceil(0.2 * N)
+        tail_start = N - tail_size
+        tail_scores = scores[tail_start:]
+        sum_tail = np.sum(tail_scores)
+        if sum_tail > 0.5:
+            alert_entries.append((step_idx, N, tail_start, sum_tail, tail_scores))
+    if alert_entries:
+        alerts[(layer, head)] = alert_entries
+
+# Append alert information to the txt file
+with open(txt_file_path, 'a') as f:
+    if alerts:
+        f.write("\nAttention Alerts:\n")
+        for (layer, head), entries in alerts.items():
+            f.write(f"\nLayer {layer}, Head {head}:\n")
+            for entry in entries:
+                step_idx, N, tail_start, sum_tail, tail_scores = entry
+                tail_size = N - tail_start
+                f.write(f"  Generation Step {step_idx} (Sequence Length {N}):\n")
+                f.write(f"    Alert: Last {tail_size} tokens (positions {tail_start} to {N-1}) sum to {sum_tail:.4f}\n")
+                f.write(f"    Attention Scores: {tail_scores.tolist()}\n")
+    else:
+        f.write("\nNo attention alerts detected.\n")
+
+print(f"Results saved to {txt_file_path}")

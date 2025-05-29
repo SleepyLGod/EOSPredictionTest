@@ -161,3 +161,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .DS_Store
+cur/preview/pe/*
+cur/predictors/saved_models/
+cur/predictors/used_prompt_ids.txt
+cur/predictors/*.jsonl
+cur/predictors/results/
+cur/predictors/logs/

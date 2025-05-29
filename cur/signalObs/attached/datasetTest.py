@@ -82,7 +82,7 @@ def plot_metrics(metrics):
     plt.title('Average Attention Score per Head')
     plt.xlabel('Head Number')
     plt.ylabel('Average Attention Score')
-    plt.savefig('../images/avg_attention_per_head.png')
+    plt.savefig('../../images/avg_attention_per_head.png')
     plt.close()
 
     plt.figure(figsize=(10, 6))
@@ -90,7 +90,7 @@ def plot_metrics(metrics):
     plt.title('Variance of Attention Scores per Layer')
     plt.xlabel('Layer Number')
     plt.ylabel('Variance')
-    plt.savefig('../images/variance_per_layer.png')
+    plt.savefig('../../images/variance_per_layer.png')
     plt.close()
 
     plt.figure(figsize=(12, 8))
@@ -100,7 +100,7 @@ def plot_metrics(metrics):
         plt.title(f'Entropy - Layer {layer}')
         plt.colorbar()
     plt.tight_layout()
-    plt.savefig('../images/entropy_per_head_layer.png')
+    plt.savefig('../../images/entropy_per_head_layer.png')
     plt.close()
 
     plt.figure(figsize=(12, 8))
@@ -110,7 +110,7 @@ def plot_metrics(metrics):
         plt.title(f'Correlation - Layer {layer}')
         plt.colorbar()
     plt.tight_layout()
-    plt.savefig('../images/correlation_per_head.png')
+    plt.savefig('../../images/correlation_per_head.png')
     plt.close()
 
 # Main execution

@@ -28,13 +28,13 @@ eos_token_id = tokenizer.eos_token_id
 # Load the dataset
 # alpaca dataset
 # with open('./data/dataset_alpaca.json', 'r') as f:
-with open('./data/datasetSimplified_alpaca.json', 'r') as f:
+with open('../data/datasetSimplified_alpaca.json', 'r') as f:
     data = json.load(f)
 prompt_id = 3
 prompt = data['qa_pairs'][prompt_id]['prompt']
 
 # Create directory to store attention scores
-scores_dir = f'./.attention_scores/prompt_full_{prompt_id}/'
+scores_dir = f'../.attention_scores/prompt_full_{prompt_id}/'
 os.makedirs(scores_dir, exist_ok=True)
 
 print(f"Prompt: {prompt}")
@@ -106,8 +106,8 @@ def generate_and_record(varying_param_name, varying_param_values, fixed_params, 
         output_lengths.append(total_tokens)
         
         # Save to .txt file
-        os.makedirs(os.path.dirname(f'.output/{output_prefix}_params_{param_value}.txt'), exist_ok=True)
-        with open(f'.output/{output_prefix}_params_{param_value}.txt', 'w') as f:
+        os.makedirs(os.path.dirname(f'../.output/{output_prefix}_params_{param_value}.txt'), exist_ok=True)
+        with open(f'../.output/{output_prefix}_params_{param_value}.txt', 'w') as f:
             f.write(f"Parameters: {current_params}\n")
             f.write(f"Generated output: {generated_text}\n")
             f.write(f"Total tokens generated: {total_tokens}\n\n")
@@ -121,7 +121,7 @@ def generate_and_record(varying_param_name, varying_param_values, fixed_params, 
     print(f"Tested {varying_param_name} = {param_value}, generated {total_tokens} tokens")
     plt.title(f'output_length & {varying_param_name} for prompt {prompt_id}')
     plt.grid(True)
-    plt.savefig(f'.output/{output_prefix}_graph.png')
+    plt.savefig(f'../.output/{output_prefix}_graph.png')
     plt.close()
 
 # Experiment 1: Vary repetition_penalty

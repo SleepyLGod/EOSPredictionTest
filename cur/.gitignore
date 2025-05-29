@@ -3,4 +3,11 @@ images/
 .output/
 .venv/
 .DS_Store
+training_data/
+.cache/huggingface/datasets
+*_responses.json
+./preview
+
+./predictors/logs
+./predictors/saved_models/
 ```
