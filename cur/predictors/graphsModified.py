@@ -16,8 +16,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger_analysis = logging.getLogger("analysis_script")
 
 # --- Configurations ---
-RESULTS_JSONL_FILE = Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250527_194051.jsonl")
-FIGURES_OUTPUT_DIR = Path("./results/databricks/")
+RESULTS_JSONL_FILE_LIST = [
+    Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250527_194051.jsonl"), # Databricks
+    Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250526_151530.jsonl"), # Clean
+    Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250529_000246.jsonl"), # Eval
+]
+FIGURES_OUTPUT_DIR_LIST = [
+    Path("./results/databricks/"),
+    Path("./results/clean/"),
+    Path("./results/eval/"),
+]
+
+RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[0]
+FIGURES_OUTPUT_DIR = FIGURES_OUTPUT_DIR_LIST[0]
 METADATA_OUTPUT_FILE = FIGURES_OUTPUT_DIR / "aggregated_metadata_and_stats.json"
 
 FIGURES_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -433,6 +444,46 @@ def analyze_and_plot_results(df: pd.DataFrame, base_output_dir: Path, metadata_s
         logger_analysis.error(f"Could not save metadata file: {e_meta}")
 
 
+def analyze_and_plot_results_scatter_pro(df: pd.DataFrame, base_output_dir: Path, metadata_store: dict):
+    if df.empty:
+        logger_analysis.info("DataFrame is empty, no analysis to perform.")
+        return
+    # --- Scatter Plot (Overall, filtered for non-tail) ---
+    scatter_plot_dir = base_output_dir / "overall"
+    scatter_plot_dir.mkdir(parents=True, exist_ok=True)
+    
+    num_scatter_samples_ratio = min(10000, len(df))
+    df_scatter_sample = df.sample(n=num_scatter_samples_ratio) if len(df) > num_scatter_samples_ratio else df.copy()
+    
+    # Scatter Plot 1: Error Ratio vs. Actual Remaining Length
+    if 'error_ratio' in df_scatter_sample.columns and 'actual_rest_len' in df_scatter_sample.columns:
+        logger_analysis.info(f"\n--- Generating Scatter Plot: Error Ratio vs. Actual Rest Len ---")
+        fig_sc_er, ax_sc_er = plt.subplots(figsize=(12, 10))
+        sns.scatterplot(
+            data=df_scatter_sample,
+            x='actual_rest_len',
+            y='error_ratio',
+            hue='temp', # Example: color by temperature
+            size='latency_ms',
+            palette='viridis', # Choose a suitable palette
+            alpha=0.6,
+            sizes=(20, 200),
+            ax=ax_sc_er,
+            legend='brief'
+        )
+        ax_sc_er.axhline(1.0, color='red', linestyle='--', label='Ideal Ratio (1.0)')
+        ax_sc_er.set_title(f"Total Length Prediction Ratio vs. Actual Remaining Length (Sampled)", fontsize=12)
+        ax_sc_er.set_xlabel("Actual Remaining Length (tokens)")
+        ax_sc_er.set_ylabel("Total Length Prediction Ratio (PredTotal/ActualTotal)")
+        ax_sc_er.set_ylim(df_scatter_sample['error_ratio'].quantile(0.01), df_scatter_sample['error_ratio'].quantile(0.99)) # Zoom on main distribution
+        ax_sc_er.legend(loc='upper right', fontsize='small')
+        ax_sc_er.grid(True, linestyle='--', alpha=0.5)
+        save_plot(fig_sc_er, "Scatter: Total Length Pred Ratio vs Actual Rest Len", 
+                    scatter_plot_dir, "scatter_error_ratio_vs_actual_rest_len.png", is_facetgrid=True) # is_facetgrid=True to use suptitle
+        
+        logger_analysis.info(f"Analysis complete. Figures and metadata saved to {base_output_dir}")
+
+
 if __name__ == '__main__':
     if not RESULTS_JSONL_FILE.exists() or RESULTS_JSONL_FILE.stat().st_size == 0:
         logger_analysis.critical(f"Results file for analysis not found or is empty: {RESULTS_JSONL_FILE}")
@@ -441,5 +492,6 @@ if __name__ == '__main__':
         if not results_df.empty:
             metadata_and_stats_summary = {} 
             analyze_and_plot_results(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
+            analyze_and_plot_results_scatter_pro(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
         else:
             logger_analysis.error("DataFrame is empty after loading. No analysis performed.")

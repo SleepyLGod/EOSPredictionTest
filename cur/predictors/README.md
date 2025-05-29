@@ -1,42 +1,154 @@
-# README
+# Length Predictor Module
 
-2 Phases of prediction:
-- [0]: use outside model to predict the length (the most stupid BERT-based model idea).
-  - OR: disaggregating the [tokens->embeddings, in the model] process and the prefill process, and thus we can predict by using rough embeddings to do the initial prediction.
-- 1st: After Prefilling stage, where the token list of the prompt was converted into embeddings and before Decoding, we pass the final word's embedding through a vector db to get the stored (rough) history length prediction.
-- 2nd: During Decoding, we pass the logits/final-layer embeddings through a lightweight model to get the prediction of the length again. (this one is like TRAIL ???) <= EOS signal sending machine.
+This module implements an end-of-sequence (EOS) prediction system for large language models (LLMs). It trains a neural network to predict how many tokens remain in a generation sequence at any given step, enabling more efficient text generation and resource planning.
 
-Side ideas:
-- under the PD disaggregation structure, so the 1st and 2nd phase predictions are good tools to do the resource allocation and scheduling.
-- Can also use attention_weights to train the model, but all the attention weights ideas are basically based on the traditional transformer-based models, not MoE structures.
-- **<EOS> signals ideas? need exploration.**
+## Overview
 
-------
-Progress:
-- 1st phase: db selection
-- 2nd&3rd phase: dataset preparation and model selection
-  - dataset problems: 
-    - toooo huge, and thus I compressed the data and randomly choose the (L,H) pairs.
-    - keep the data that cannot meet the <EOS> token?
-  - model problems: not trained yet.
-- others:
-  - is the IDC server ready?
+The system consists of three main components:
+1. **Model Training** (`ebdModelGenFinal.py`) - Trains the length prediction neural network
+2. **Model Evaluation** (`resultTest.py`) - Evaluates trained models on various datasets
+3. **Results Analysis** (`graphsModified.py`) - Generates comprehensive visualizations and statistics
 
-**IMPORTANT**:
-During inference:
-- prompt->tokens (tokenization): in CPU; output: CPU tensors in RAM; no semantical information.
-- tokens->embeddings (embedding layer): including mapping the token_ids to high-dimentional vectors (1st, by look-up table) and positional encoding (2nd); in GPU by default; output: GPU tensors in GPU memory; semantical information.
-- attention layers...: in GPU
+## Core Files
 
-=> an no extra-cost way: as the prompt goes through the embedding layer and generate the embeddings (no attentions), we directly send it to the vector db to get the prediction result for D (at the same time, the model is doing P)
+### 🧠 `ebdModelGenFinal.py` - Neural Network Training
+**Purpose**: Trains an Enhanced MLP (Multi-Layer Perceptron) to predict remaining sequence length using LLM embeddings and generation parameters.
 
----------------------
+**Key Features**:
+- **Enhanced MLP Architecture**: 8192-dimensional input with residual connections, batch normalization, and dropout
+- **Multi-GPU Training**: Distributed Data Parallel (DDP) support with automatic mixed precision (AMP)
+- **Robust Data Loading**: Handles compressed `.npz` feature files with error recovery
+- **Advanced Optimization**: AdamW optimizer with cosine annealing and gradient clipping
 
-Seems like the GPU-GPU connections are very fast (like NVLink)
-For CPU-GPU connection, the speed can be improved by using CXL(u mentioned before), RDMA, or using DPU/shared memory to cache, but is still quite slower than the GPU-GPU things.
+**Input Features**:
+- LLM hidden state embeddings (8192-dim)
+- Decoding parameters (temperature, top_k, repetition_penalty, max_tokens)
+- Current sequence position
+- Target: Remaining tokens until EOS
 
-But I think the biggest point is that: the embeddings of prompt are huge, say for GPT-3, the size is seq_len\times 12288, and GPT-3 is small compared to current big models, especially MoE ones.
+**Training Configuration**:
+```python
+HIDDEN_SIZE = 8192
+BATCH_SIZE_PER_GPU = 32
+LEARNING_RATE = 1e-3
+EPOCHS = 50
+```
 
-Of course, in our experiments, the model is not such big and the embedding size can somehow not be the bottleneck, but I personally think it is not a general solution (we r not arch people)
+### 🔬 `resultTest.py` - Model Evaluation Framework
+**Purpose**: Comprehensive evaluation of trained length predictors on real text generation tasks using various datasets and decoding parameters.
 
-**we can also consider the embedding lookup part be  disaggregated on to another gpu**
+**Key Features**:
+- **Multi-Dataset Support**: Alpaca, Alpaca-Eval, Databricks Dolly datasets
+- **Real-Time Prediction**: Step-by-step length prediction during actual LLM generation
+- **Parameter Sweep**: Tests multiple temperature, top_k, repetition_penalty combinations
+- **Detailed Logging**: Per-step predictions, latencies, and errors saved to JSONL format
+
+**Evaluation Process**:
+1. Load prompts from selected dataset (with training data exclusion)
+2. For each prompt and parameter combination:
+   - Generate text step-by-step with the LLM
+   - At each step, predict remaining length using the trained model
+   - Record actual vs predicted lengths
+3. Calculate comprehensive error metrics (MAE, RMSE, bias)
+
+**Output**: Detailed JSONL files with per-step predictions for downstream analysis
+
+### 📊 `graphsModified.py` - Results Visualization & Analysis
+**Purpose**: Generates comprehensive visualizations and statistical analysis from evaluation results.
+
+**Key Features**:
+- **Performance Metrics**: MAE, RMSE, R², bias calculations overall and per parameter group
+- **Advanced Visualizations**:
+  - Error distribution histograms
+  - Prediction consistency heatmaps (TRAIL-style)
+  - Scatter plots (predicted vs actual)
+  - Per-prompt evolution plots
+  - Latency analysis (violin plots)
+- **Tail Analysis**: Special handling for sequences near completion (≤5 tokens remaining)
+- **Parameter Group Analysis**: Separate analysis for each decoding parameter combination
+
+**Generated Outputs**:
+- Overall performance plots and metrics
+- Per-parameter-group detailed analysis
+- Per-prompt evolution tracking
+- Aggregated metadata JSON with all statistics
+
+## Folder Structure
+
+```
+cur/predictors/
+├── README.md                          # This file
+├── ebdModelGenFinal.py                # Neural network training script
+├── resultTest.py                      # Model evaluation framework
+├── graphsModified.py                  # Results analysis and visualization
+├── idChecking.py                      # Utility for ID validation
+├── used_prompt_ids.txt                # Training data prompt IDs (for exclusion)
+│
+├── saved_models/                      # Trained model checkpoints
+│   └── 20250509_003641/              # Training run timestamp
+│       ├── enhanced_mlp_best.pth     # Best model checkpoint
+│       └── checkpoint_epoch_*.pth    # Per-epoch checkpoints
+│
+├── logs/                             # Training logs
+│   ├── 20250509_003641/             # Training run logs
+│   └── train_*.log                  # Historical training logs
+│
+├── results/                         # Analysis results
+│   ├── clean/                       # Clean dataset results
+│   ├── databricks/                  # Databricks dataset results
+│   └── eval/                        # Evaluation dataset results
+│       ├── overall/                 # Overall performance plots
+│       ├── per_param_group/         # Parameter-specific analysis
+│       └── per_prompt_evolution/    # Individual prompt tracking
+│
+├── eval_output/                     # Evaluation output directory
+├── length_predictor_eval_results_*.jsonl  # Detailed evaluation results
+└── Phase*.ipynb                     # Development notebooks
+```
+
+## Quick Start
+
+### 1. Training a Model
+```bash
+# Ensure training data is available in ../training_data/ebd/features/llama3_70b/
+python ebdModelGenFinal.py
+```
+
+### 2. Evaluating a Model
+```bash
+# Update LENGTH_PREDICTOR_PATH in resultTest.py to point to your trained model
+python resultTest.py
+```
+
+### 3. Analyzing Results
+```bash
+# Update RESULTS_JSONL_FILE in graphsModified.py to point to your evaluation results
+python graphsModified.py
+```
+
+## Dependencies
+
+- **PyTorch**: Neural network training and inference
+- **Transformers**: LLM loading and tokenization
+- **Datasets**: HuggingFace dataset loading
+- **NumPy/Pandas**: Data manipulation
+- **Matplotlib/Seaborn**: Visualization
+- **scikit-learn**: Metrics calculation
+- **tqdm**: Progress bars
+
+## Key Metrics
+
+The system tracks several important metrics:
+- **MAE (Mean Absolute Error)**: Average prediction error in tokens
+- **RMSE (Root Mean Square Error)**: Penalizes larger errors more heavily
+- **R² Score**: Correlation between predicted and actual lengths
+- **Bias**: Systematic over/under-prediction tendency
+- **Tail Error Ratio**: Special metric for near-completion sequences
+- **Latency**: Prediction inference time
+
+## Notes
+
+- Training requires pre-computed LLM embeddings and features (see `../training_data/`)
+- Evaluation uses real LLM generation, requiring significant GPU memory
+- Results analysis generates extensive visualizations for thorough performance assessment
+- The system is designed for Meta-Llama-3-70B but can be adapted for other models
