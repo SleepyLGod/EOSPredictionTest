@@ -23,9 +23,9 @@ FIGURES_OUTPUT_FILE_LIST = [
     Path("./eval_output/prefill_err_profiles_eval.jsonl"),
 ]
 
-RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[1]
-ERROR_PROFILE_OUTPUT_FILE = FIGURES_OUTPUT_FILE_LIST[1]
-EVAL_OUTPUT_BASE_DIR = Path("./eval_output/clean")
+RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[0]
+ERROR_PROFILE_OUTPUT_FILE = FIGURES_OUTPUT_FILE_LIST[0]
+EVAL_OUTPUT_BASE_DIR = Path("./eval_output/db")
 
 ERROR_PROFILE_OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -403,9 +403,7 @@ def _plot_distribution_to_file(ratios_np: np.ndarray, title: str, output_path: P
         filtered_count = len(filtered_data)
         filtered_pct = (filtered_count / len(ratios_np)) * 100
         stats_text += f"\nIn Range: {filtered_count} ({filtered_pct:.1f}%)"
-        # Debug info to verify frequency calculation
-        stats_text += f"\nDenominator: {total_count}"
-        stats_text += f"\nSum of freq: {frequency_density.sum():.3f}"
+
     
     ax.text(0.98, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
             verticalalignment='top', horizontalalignment='right',

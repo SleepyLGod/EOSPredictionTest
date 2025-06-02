@@ -73,6 +73,33 @@ for combo in all_param_combinations:
     }
     DECODING_PARAMS_LIST.append(param_set)
 
+DECODING_PARAMS_LIST_DB = [
+    {'temperature': 0.3, 'top_k': 1, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    {'temperature': 0.1, 'top_k': 1, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    {'temperature': 0.3, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    # {'temperature': 0.5, 'top_k': 1, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    # {'temperature': 0.1, 'top_k': 1, 'repetition_penalty': 1.5, 'max_new_tokens': 300},
+    # {'temperature': 0.5, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300}
+]
+
+DECODING_PARAMS_LIST_CLEAN = [
+    {'temperature': 0.7, 'top_k': 100, 'repetition_penalty': 1.3, 'max_new_tokens': 300},
+    {'temperature': 0.7, 'top_k': 100, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    {'temperature': 0.3, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    # {'temperature': 0.5, 'top_k': 10, 'repetition_penalty': 1.6, 'max_new_tokens': 300},
+    # {'temperature': 0.1, 'top_k': 50, 'repetition_penalty': 1.6, 'max_new_tokens': 400},
+    # {'temperature': 0.9, 'top_k': 100, 'repetition_penalty': 1.6, 'max_new_tokens': 400}
+]
+
+DECODING_PARAMS_LIST_EVAL = [
+    {'temperature': 0.1, 'top_k': 100, 'repetition_penalty': 1.5, 'max_new_tokens': 300},
+    {'temperature': 0.9, 'top_k': 10, 'repetition_penalty': 1.5, 'max_new_tokens': 300},
+    {'temperature': 0.7, 'top_k': 50, 'repetition_penalty': 1.3, 'max_new_tokens': 300},
+    # {'temperature': 0.3, 'top_k': 100, 'repetition_penalty': 1.3, 'max_new_tokens': 300},
+    # {'temperature': 0.5, 'top_k': 50, 'repetition_penalty': 1.5, 'max_new_tokens': 300},
+    # {'temperature': 0.9, 'top_k': 50, 'repetition_penalty': 1.6, 'max_new_tokens': 300}
+]
+
 def load_used_prompt_ids(filepath: Path) -> set:
     """Loads a set of used prompt IDs from a file (one ID per line)."""
     used_ids = set()
