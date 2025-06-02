@@ -27,8 +27,8 @@ FIGURES_OUTPUT_DIR_LIST = [
     Path("./results/eval/"),
 ]
 
-RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[0]
-FIGURES_OUTPUT_DIR = FIGURES_OUTPUT_DIR_LIST[0]
+RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[2]
+FIGURES_OUTPUT_DIR = FIGURES_OUTPUT_DIR_LIST[2]
 METADATA_OUTPUT_FILE = FIGURES_OUTPUT_DIR / "aggregated_metadata_and_stats.json"
 
 FIGURES_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,6 +43,7 @@ MIN_SEQ_POS, MAX_SEQ_POS = 0, 8191 # Should match training normalization range f
 
 # New constant for tail analysis
 TAIL_LENGTH_THRESHOLD = 5 # Steps where actual_rest_len <= this are considered "tail"
+SPECIFIC_TAIL = 30 # For specific tail analysis
 NUM_SAMPLED_PROMPTS_FOR_EVOLUTION = 10
 MAX_LEGEND_ITEMS_PER_PLOT = 10
 
@@ -484,6 +485,375 @@ def analyze_and_plot_results_scatter_pro(df: pd.DataFrame, base_output_dir: Path
         logger_analysis.info(f"Analysis complete. Figures and metadata saved to {base_output_dir}")
 
 
+def analyze_and_plot_tail_overall_distributions(df: pd.DataFrame, base_output_dir: Path, metadata_store: dict):
+    if df.empty:
+        logger_analysis.info("DataFrame is empty, no analysis to perform.")
+        return
+    logger_analysis.info("\n--- Generating Overall Distributions ---")
+    
+    overall_metrics = {}
+    
+    overall_dir = base_output_dir / "overall" / "specific_tail"
+    overall_dir.mkdir(parents=True, exist_ok=True)
+    # Relative Error Ratios for Remaining Length (Filtered for actual_rest_len > TAIL_LENGTH_THRESHOLD)
+    for i in range(0, SPECIFIC_TAIL):
+        df_non_tail_rel_err = df[df['actual_rest_len'] > i].copy()
+        
+        if 'error_ratio' in df.columns: # non absolute non tail error ratio
+            overall_metrics['mean_non_tail_error_ratio'] = df_non_tail_rel_err['error_ratio'].mean()
+            overall_metrics['median_non_tail_error_ratio'] = df_non_tail_rel_err['error_ratio'].median()
+            logger_analysis.info(f"Overall Mean Non-Tail Error Ratio (ActualRestLen > {i}): {overall_metrics.get('mean_non_tail_error_ratio', 'N/A'):.3f}")
+            logger_analysis.info(f"Overall Median Non-Tail Error Ratio (ActualRestLen > {i}): {overall_metrics.get('median_non_tail_error_ratio', 'N/A'):.3f}")
+            
+            fig_er_dist, ax_er_dist = plt.subplots(figsize=(10,6))
+            sns.histplot(df_non_tail_rel_err['error_ratio'].dropna().clip(0, 3), bins=50, kde=True, ax=ax_er_dist)
+            ax_er_dist.axvline(1.0, color='red', linestyle='--', label='Ideal Ratio (1.0)')
+            ax_er_dist.legend()
+            ax_er_dist.set_title(f"Total Output Length Prediction Ratio (ActualRestLen > {i}, Clipped)", fontsize=12)
+            save_plot(fig_er_dist, f"Overall: Distribution of Total Output Length Prediction Ratio (ActualRestLen > {i})", overall_dir, f"non_tail_{i}.png")
+        
+        if not df_non_tail_rel_err.empty and 'actual_rest_len' in df_non_tail_rel_err and 'prediction_error' in df_non_tail_rel_err:
+            epsilon = 1e-6 
+            df_non_tail_rel_err['rel_error_signed_non_tail'] = df_non_tail_rel_err['prediction_error'] / (df_non_tail_rel_err['actual_rest_len'] + epsilon)
+            df_non_tail_rel_err['rel_error_abs_non_tail'] = df_non_tail_rel_err['rel_error_signed_non_tail'].abs()
+            overall_metrics['mean_rel_error_abs_non_tail'] = df_non_tail_rel_err['rel_error_abs_non_tail'].mean()
+        
+            fig_rel_err_dist, ax_rel_err_dist = plt.subplots(figsize=(10,6))
+            sns.histplot(df_non_tail_rel_err['rel_error_abs_non_tail'].dropna().clip(0, 2), bins=50, kde=True, ax=ax_rel_err_dist)
+            ax_rel_err_dist.set_title(f"Absolute Relative Error on Rem. Len. (ActualRestLen > {i}, Clipped)", fontsize=12)
+            save_plot(fig_rel_err_dist, f"Overall: Dist of Abs Rel Error (ActualRestLen > {i})", overall_dir, f"ab_non_tail_{i}.png")
+        
+        # Tail Error Ratio Analysis
+        df_tail = df[df['actual_rest_len'] <= i].copy()
+        if not df_tail.empty and 'actual_rest_len' in df_tail and 'prediction_error' in df_tail:
+            epsilon = 1e-6
+            df_tail['tail_error_ratio_signed'] = df_tail['prediction_error'] / (df_tail['actual_rest_len'] + epsilon)
+            df_tail['tail_error_ratio_abs'] = df_tail['tail_error_ratio_signed'].abs()
+            overall_metrics['mean_tail_abs_error_ratio'] = df_tail['tail_error_ratio_abs'].mean(skipna=True)
+            overall_metrics['median_tail_abs_error_ratio'] = df_tail['tail_error_ratio_abs'].median(skipna=True)
+            logger_analysis.info(f"Overall Mean Absolute Tail Error Ratio (ActualRestLen <= {i}): {overall_metrics.get('mean_tail_abs_error_ratio', 'N/A'):.3f}")
+            
+            fig_tail_err_dist, ax_tail_err_dist = plt.subplots(figsize=(10,6))
+            sns.histplot(df_tail['tail_error_ratio_abs'].dropna().clip(0,5), bins=30, kde=True, ax=ax_tail_err_dist)
+            ax_tail_err_dist.set_title(f"Absolute Tail Error Ratio (ActualRestLen <= {i}, Clipped)", fontsize=12)
+            save_plot(fig_tail_err_dist, f"Overall: Distribution of Absolute Tail Error Ratio (ActualRestLen <= {i})", overall_dir, f"ab_tail_{i}.png")
+    
+    overall_dir = base_output_dir / "overall" / "specific_tail_step"
+    overall_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(0, SPECIFIC_TAIL):
+        # Filter out both tail tokens and early generation steps
+        df_non_tail_rel_err = df[(df['actual_rest_len'] > i) & (df['step_index'] > i)].copy()
+        
+        if 'error_ratio' in df.columns: # non absolute non tail error ratio
+            overall_metrics['mean_non_tail_error_ratio'] = df_non_tail_rel_err['error_ratio'].mean()
+            overall_metrics['median_non_tail_error_ratio'] = df_non_tail_rel_err['error_ratio'].median()
+            logger_analysis.info(f"Overall Mean Non-Tail Error Ratio (ActualRestLen > {i}, StepIndex > {i}): {overall_metrics.get('mean_non_tail_error_ratio', 'N/A'):.3f}")
+            logger_analysis.info(f"Overall Median Non-Tail Error Ratio (ActualRestLen > {i}, StepIndex > {i}): {overall_metrics.get('median_non_tail_error_ratio', 'N/A'):.3f}")
+            
+            fig_er_dist, ax_er_dist = plt.subplots(figsize=(10,6))
+            sns.histplot(df_non_tail_rel_err['error_ratio'].dropna().clip(0, 3), bins=50, kde=True, ax=ax_er_dist)
+            ax_er_dist.axvline(1.0, color='red', linestyle='--', label='Ideal Ratio (1.0)')
+            ax_er_dist.legend()
+            ax_er_dist.set_title(f"Total Output Length Prediction Ratio (ActualRestLen > {i}, StepIndex > {i}, Clipped)", fontsize=12)
+            save_plot(fig_er_dist, f"Overall: Distribution of Total Output Length Prediction Ratio (ActualRestLen > {i}, StepIndex > {i})", overall_dir, f"non_tail_step_{i}.png")
+        
+        if not df_non_tail_rel_err.empty and 'actual_rest_len' in df_non_tail_rel_err and 'prediction_error' in df_non_tail_rel_err:
+            epsilon = 1e-6 
+            df_non_tail_rel_err['rel_error_signed_non_tail'] = df_non_tail_rel_err['prediction_error'] / (df_non_tail_rel_err['actual_rest_len'] + epsilon)
+            df_non_tail_rel_err['rel_error_abs_non_tail'] = df_non_tail_rel_err['rel_error_signed_non_tail'].abs()
+            overall_metrics['mean_rel_error_abs_non_tail'] = df_non_tail_rel_err['rel_error_abs_non_tail'].mean()
+        
+            fig_rel_err_dist, ax_rel_err_dist = plt.subplots(figsize=(10,6))
+            sns.histplot(df_non_tail_rel_err['rel_error_abs_non_tail'].dropna().clip(0, 2), bins=50, kde=True, ax=ax_rel_err_dist)
+            ax_rel_err_dist.set_title(f"Absolute Relative Error on Rem. Len. (ActualRestLen > {i}, StepIndex > {i}, Clipped)", fontsize=12)
+            save_plot(fig_rel_err_dist, f"Overall: Dist of Abs Rel Error (ActualRestLen > {i}, StepIndex > {i})", overall_dir, f"ab_non_tail_step_{i}.png")
+
+
+def analyze_and_plot_regions(df: pd.DataFrame, base_output_dir: Path, metadata_store: dict):
+    if df.empty:
+        logger_analysis.info("DataFrame is empty, cannot analyze regions.")
+        return
+    
+    logger_analysis.info("\n--- Analyzing Prediction Quality Regions ---")
+    regions_dir = base_output_dir / "overall" / "prediction_regions"
+    regions_dir.mkdir(parents=True, exist_ok=True)
+    
+    # --- Ensure necessary columns are present and calculated ---
+    # (This part is similar to your previous analyze_and_plot_regions, ensuring ratios are calculated)
+    df_regions = df.copy()
+    if 'error_ratio' not in df_regions.columns:
+        if all(k in df_regions for k in ['current_full_sequence_len_for_pred', 'predicted_rest_len', 'actual_rest_len']):
+            df_regions['predicted_total_len_from_step'] = df_regions['current_full_sequence_len_for_pred'] + df_regions['predicted_rest_len']
+            df_regions['actual_total_len_from_step'] = df_regions['current_full_sequence_len_for_pred'] + df_regions['actual_rest_len']
+            df_regions['error_ratio'] = df_regions['predicted_total_len_from_step'] / df_regions['actual_total_len_from_step'].replace(0, np.nan)
+        else:
+            logger_analysis.error("Cannot calculate 'error_ratio' for region analysis due to missing columns.")
+            return
+    
+    if 'abs_rel_error_remaining' not in df_regions.columns: # Assuming this name for |(pred-actual)/actual|_remaining
+        if all(k in df_regions for k in ['prediction_error', 'actual_rest_len']):
+            epsilon = 1e-6 
+            df_regions['abs_rel_error_remaining'] = (df_regions['prediction_error'] / (df_regions['actual_rest_len'] + epsilon)).abs()
+        else:
+            logger_analysis.error("Cannot calculate 'abs_rel_error_remaining' for region analysis due to missing columns.")
+            return
+            
+    df_regions.dropna(subset=['error_ratio', 'abs_rel_error_remaining', 'step_index'], inplace=True)
+    if df_regions.empty:
+        logger_analysis.warning("No data remaining after calculating ratios and dropping NaNs for region analysis.")
+        return
+    
+    # --- Define region conditions based on your observations ---
+    # These thresholds are based on your description of "陡增陡降"
+    # You might need to fine-tune the exact boundaries of the "anomaly" if it's a narrow peak.
+    
+    # Condition for "Prediction Ratio Anomaly" (where you see the spike)
+    # Assuming the spike is for ratio > 2.9
+    cond_pr_anomaly = (df_regions['error_ratio'] > 2.9)
+    # If the spike is a narrow band, e.g., 2.8 to 3.0:
+    # cond_pr_anomaly = (df_regions['error_ratio'] > 2.8) & (df_regions['error_ratio'] < 3.0) 
+    
+    # Condition for "Absolute Relative Error (on remaining) Anomaly"
+    cond_are_anomaly = (df_regions['abs_rel_error_remaining'] > 1.9)
+    # If spike is narrow band for ARE:
+    # cond_are_anomaly = (df_regions['abs_rel_error_remaining'] > 1.8) & (df_regions['abs_rel_error_remaining'] < 2.0)
+    
+    # Condition for "Truly Good" predictions (prediction ratio close to 1)
+    good_ratio_lower_bound = 0.8 # Example, adjust as needed
+    good_ratio_upper_bound = 1.2 # Example, adjust as needed
+    cond_truly_good = (df_regions['error_ratio'] >= good_ratio_lower_bound) & \
+                        (df_regions['error_ratio'] <= good_ratio_upper_bound)
+    
+    # Assign region labels
+    df_regions['region_label'] = 'Normal' # Default
+    df_regions.loc[cond_truly_good, 'region_label'] = f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})'
+    # Anomalies override "Good" or "Normal" if conditions met
+    df_regions.loc[cond_pr_anomaly, 'region_label'] = 'PR Anomaly (Ratio > 2.9)'
+    
+    # Create a dedicated label column for ARE anomaly to avoid overwriting PR anomaly label
+    df_regions['are_region_label'] = 'ARE Normal / Moderate'
+    df_regions.loc[cond_are_anomaly, 'are_region_label'] = 'ARE Anomaly (AbsRelErr > 1.9)'
+    
+    # If a point is both PR anomaly and ARE anomaly, it will be labeled by the last assignment.
+    # You might want a combined category or prioritize one.
+    # For now, let's make PR Anomaly take precedence if a point is also "Good Ratio"
+    df_regions.loc[cond_pr_anomaly & cond_truly_good, 'region_label'] = 'PR Anomaly (Ratio > 2.9)'
+    
+    # --- Plotting ---
+    # Sample data if too large for clear scatter plots
+    num_samples_for_plot = min(20000, len(df_regions))
+    df_plot_sample = df_regions.sample(n=num_samples_for_plot, random_state=42) if len(df_regions) > num_samples_for_plot else df_regions.copy()
+    
+    # Plot 1: Prediction Ratio vs. Step Index, colored by 'region_label'
+    fig1, ax1 = plt.subplots(figsize=(15, 8))
+    sns.scatterplot(
+        data=df_plot_sample,
+        x='step_index',
+        y='error_ratio',
+        hue='region_label',
+        palette={'Normal': 'lightgrey', 
+                f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})': 'green',
+                'PR Anomaly (Ratio > 2.9)': 'orange'},
+        alpha=0.7,
+        s=10, # Smaller points for density
+        ax=ax1
+    )
+    ax1.set_xlabel("Decoding Step Index")
+    ax1.set_ylabel("Prediction Ratio (PredTotal / ActualTotal)")
+    ax1.axhline(1.0, color='blue', linestyle='--', label='Ideal Ratio (1.0)')
+    ax1.axhline(2.9, color='red', linestyle=':', label='PR Anomaly Threshold (>2.9)')
+    ax1.set_ylim(df_plot_sample['error_ratio'].quantile(0.01) - 0.1, # Adjust Y limits to focus
+                min(df_plot_sample['error_ratio'].quantile(0.99) + 0.1, 10) ) # Cap Y limit
+    ax1.legend(title="Region Type", loc='upper right')
+    save_plot(fig1, "Prediction Ratio vs. Step Index by Region Type", 
+                regions_dir, "pr_vs_step_by_region.png")
+    
+    # Plot 2: Absolute Relative Error (on remaining) vs. Step Index, colored by its anomaly
+    # Create a dedicated label column for ARE anomaly to avoid overwriting PR anomaly label
+    df_plot_sample['are_region_label'] = 'ARE Normal / Moderate'
+    df_plot_sample.loc[cond_are_anomaly[df_plot_sample.index], 'are_region_label'] = 'ARE Anomaly (AbsRelErr > 1.9)' # Apply cond_are_anomaly to the sample
+    
+    fig2, ax2 = plt.subplots(figsize=(15, 8))
+    sns.scatterplot(
+        data=df_plot_sample,
+        x='step_index',
+        y='abs_rel_error_remaining',
+        hue='are_region_label', # Use the dedicated ARE label
+        palette={'ARE Normal / Moderate': 'lightgrey',
+                'ARE Anomaly (AbsRelErr > 1.9)': 'purple'},
+        alpha=0.7,
+        s=10,
+        ax=ax2
+    )
+    ax2.set_xlabel("Decoding Step Index")
+    ax2.set_ylabel("Absolute Relative Error on Remaining Length")
+    ax2.axhline(1.9, color='red', linestyle=':', label='ARE Anomaly Threshold (>1.9)')
+    ax2.set_ylim(df_plot_sample['abs_rel_error_remaining'].quantile(0.01) - 0.1, # Adjust Y limits
+                min(df_plot_sample['abs_rel_error_remaining'].quantile(0.99) + 0.1, 10) )# Cap Y limit
+    ax2.legend(title="ARE Region Type", loc='upper right')
+    save_plot(fig2, "Absolute Relative Error (Rem.) vs. Step Index by ARE Anomaly", 
+                regions_dir, "are_vs_step_by_anomaly.png")
+    
+    # Plot 3: Density of "Truly Good" points across step_index
+    fig_good_density, ax_good_density = plt.subplots(figsize=(12, 7))
+    df_good_only = df_regions[df_regions['region_label'] == f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})']
+    if not df_good_only.empty:
+        sns.histplot(data=df_good_only, x='step_index', kde=True, bins=50, ax=ax_good_density, 
+                        stat="density", common_norm=False, label=f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})', color='green')
+        ax_good_density.set_xlabel("Decoding Step Index")
+        ax_good_density.set_ylabel("Density of 'Good Ratio' Points")
+        ax_good_density.legend()
+        save_plot(fig_good_density, "Density of 'Good Ratio' Predictions across Decoding Steps",
+                    regions_dir, "good_ratio_density_vs_step.png")
+    else:
+        logger_analysis.warning("No data points fall into the 'Good Ratio' region for density plot.")
+        plt.close(fig_good_density)
+    
+    # Plot 4 & 5: Density of "Anomaly" points across step_index
+    df_pr_anomaly_only = df_regions[df_regions['region_label'] == 'PR Anomaly (Ratio > 2.9)']
+    if not df_pr_anomaly_only.empty:
+        fig_pr_anomaly_density, ax_pr_anomaly_density = plt.subplots(figsize=(12, 7))
+        sns.histplot(data=df_pr_anomaly_only, x='step_index', kde=True, bins=50, ax=ax_pr_anomaly_density,
+                        stat="density", common_norm=False, label='PR Anomaly (Ratio > 2.9)', color='orange')
+        ax_pr_anomaly_density.set_xlabel("Decoding Step Index")
+        ax_pr_anomaly_density.set_ylabel("Density of 'PR Anomaly' Points")
+        ax_pr_anomaly_density.legend()
+        save_plot(fig_pr_anomaly_density, "Density of 'PR Anomaly' Predictions across Decoding Steps",
+                    regions_dir, "pr_anomaly_density_vs_step.png")
+    else:
+        logger_analysis.warning("No data points fall into 'PR Anomaly' region for density plot.")
+        # plt.close(fig_pr_anomaly_density) # fig might not be defined if empty
+    
+    df_are_anomaly_only = df_regions[df_regions['are_region_label'] == 'ARE Anomaly (AbsRelErr > 1.9)'] # Use the correct label col
+    if not df_are_anomaly_only.empty:
+        fig_are_anomaly_density, ax_are_anomaly_density = plt.subplots(figsize=(12, 7))
+        sns.histplot(data=df_are_anomaly_only, x='step_index', kde=True, bins=50, ax=ax_are_anomaly_density,
+                        stat="density", common_norm=False, label='ARE Anomaly (AbsRelErr > 1.9)', color='purple')
+        ax_are_anomaly_density.set_xlabel("Decoding Step Index")
+        ax_are_anomaly_density.set_ylabel("Density of 'ARE Anomaly' Points")
+        ax_are_anomaly_density.legend()
+        save_plot(fig_are_anomaly_density, "Density of 'ARE Anomaly' Predictions across Decoding Steps",
+                    regions_dir, "are_anomaly_density_vs_step.png")
+    else:
+        logger_analysis.warning("No data points fall into 'ARE Anomaly' region for density plot.")
+        # plt.close(fig_are_anomaly_density)
+    
+    # Store some aggregated region stats in metadata_store
+    if 'region_label' in df_regions:
+        region_proportions = df_regions['region_label'].value_counts(normalize=True).to_dict()
+        are_region_proportions = df_regions['are_region_label'].value_counts(normalize=True).to_dict()
+        logger_analysis.info(f"Proportions by 'region_label': {region_proportions}")
+        logger_analysis.info(f"Proportions by 'are_region_label': {are_region_proportions}")
+        if 'prediction_regions_detailed' not in metadata_store: metadata_store['prediction_regions_detailed'] = {}
+        metadata_store['prediction_regions_detailed']['pr_region_proportions'] = region_proportions
+        metadata_store['prediction_regions_detailed']['are_region_proportions'] = are_region_proportions
+    
+    logger_analysis.info(f"Detailed region analysis plots saved to {regions_dir}")
+
+
+def plot_pr_vs_step_by_region_per_param_group(
+    df: pd.DataFrame, 
+    base_output_dir: Path,
+    # Constants for region definition, passed from the main analysis or defined here
+    pr_anomaly_threshold: float = 2.9,
+    good_ratio_lower_bound: float = 0.8,
+    good_ratio_upper_bound: float = 1.2
+):
+    if df.empty:
+        logger_analysis.info("DataFrame is empty, cannot generate per-param-group PR vs Step plots.")
+        return
+    
+    # Ensure 'error_ratio' and 'step_index' are present
+    if 'error_ratio' not in df.columns or 'step_index' not in df.columns:
+        logger_analysis.error("Required columns 'error_ratio' or 'step_index' are missing. Cannot generate these plots.")
+        return
+    
+    param_cols = ['temp', 'top_k', 'rep_p', 'max_new_tok_session']
+    if not all(col in df.columns for col in param_cols):
+        logger_analysis.error(f"One or more parameter columns for grouping are missing: {param_cols}")
+        return
+        
+    output_subdir = base_output_dir / "overall" / "prediction_regions" / "pr_vs_step_by_region_per_param_group"
+    output_subdir.mkdir(parents=True, exist_ok=True)
+    logger_analysis.info(f"\n--- Generating 'Prediction Ratio vs. Step Index by Region' for each Parameter Group ---")
+    logger_analysis.info(f"Plots will be saved in: {output_subdir}")
+    
+    # Define region labels based on thresholds
+    df_plot = df.copy() # Work on a copy
+    
+    cond_pr_anomaly = (df_plot['error_ratio'] > pr_anomaly_threshold)
+    cond_truly_good = (df_plot['error_ratio'] >= good_ratio_lower_bound) & \
+                        (df_plot['error_ratio'] <= good_ratio_upper_bound)
+    
+    df_plot['region_label'] = 'Normal'
+    df_plot.loc[cond_truly_good, 'region_label'] = f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})'
+    df_plot.loc[cond_pr_anomaly, 'region_label'] = f'PR Anomaly (Ratio > {pr_anomaly_threshold})'
+    # PR Anomaly can override Good Ratio if a point satisfies both, which is logical
+    # df_plot.loc[cond_pr_anomaly & cond_truly_good, 'region_label'] = f'PR Anomaly (Ratio > {pr_anomaly_threshold})' # Already handled by order
+    
+    # Get unique parameter groups
+    unique_param_groups = df_plot[param_cols].drop_duplicates().to_dict('records')
+    
+    for i, group_params_dict in enumerate(tqdm(unique_param_groups, desc="Plotting PR vs Step for Param Groups")):
+        group_params_str_for_file = "_".join([f"{k.replace('_','')[0:3]}{v}" for k, v in group_params_dict.items()])
+        group_params_title_str = ", ".join([f"{k.replace('temperature','T').replace('repetition_penalty','RP').replace('max_new_tokens','MNT')}={v}" for k, v in group_params_dict.items()])
+        
+        query = " & ".join([f"`{k}` == {v}" for k, v in group_params_dict.items()])
+        group_df = df_plot.query(query)
+        
+        if group_df.empty:
+            logger_analysis.debug(f"No data for parameter group: {group_params_title_str}. Skipping plot.")
+            continue
+        
+        # Sample if too many points for a clear scatter plot within this group
+        num_samples_per_group_plot = min(5000, len(group_df)) # Max 5k points per plot
+        plot_group_df = group_df.sample(n=num_samples_per_group_plot, random_state=42) if len(group_df) > num_samples_per_group_plot else group_df.copy()
+        
+        fig, ax = plt.subplots(figsize=(15, 8))
+        sns.scatterplot(
+            data=plot_group_df,
+            x='step_index',
+            y='error_ratio',
+            hue='region_label',
+            palette={'Normal': 'lightgrey', 
+                    f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})': 'green',
+                    f'PR Anomaly (Ratio > {pr_anomaly_threshold})': 'orange'},
+            hue_order=['Normal', f'Good Ratio ({good_ratio_lower_bound}-{good_ratio_upper_bound})', f'PR Anomaly (Ratio > {pr_anomaly_threshold})'], # Ensure consistent legend order
+            alpha=0.7,
+            s=15, # Adjust marker size
+            ax=ax
+        )
+        ax.set_xlabel("Decoding Step Index")
+        ax.set_ylabel("Prediction Ratio (PredTotal / ActualTotal)")
+        ax.axhline(1.0, color='blue', linestyle='--', label='Ideal Ratio (1.0)')
+        ax.axhline(pr_anomaly_threshold, color='red', linestyle=':', label=f'PR Anomaly Thresh. (>{pr_anomaly_threshold})')
+        
+        # Adjust Y limits to focus on the main data range, but try to include anomalies
+        # Calculate quantiles on the original group_df to avoid being skewed by sampling for plotting
+        if not group_df['error_ratio'].empty:
+            q01 = group_df['error_ratio'].quantile(0.01)
+            q99 = group_df['error_ratio'].quantile(0.99)
+            # Ensure y_min is not excessively low, and y_max not excessively high if anomalies are extreme
+            y_min_plot = max(0, q01 - 0.2 * (q99 - q01)) # Go a bit below 1st percentile
+            y_max_plot = min(max(5, q99 + 0.2 * (q99 - q01)), 15)  # Go a bit above 99th, but cap at a reasonable max (e.g., 10 or 15)
+            if pd.notna(y_min_plot) and pd.notna(y_max_plot) and y_min_plot < y_max_plot:
+                ax.set_ylim(y_min_plot, y_max_plot)
+            else: # Fallback if quantiles are weird
+                ax.set_ylim(0, 5) 
+        
+        # Shrink current axis's height by 10% on the bottom
+        # box = ax.get_position()
+        # ax.set_position([box.x0, box.y0 + box.height * 0.1, box.width, box.height * 0.9])
+        ax.legend(title="Region Type", loc='upper right', fontsize='small') # loc='center left', bbox_to_anchor=(1, 0.5)
+        
+        plot_filename = f"pr_vs_step_region_{group_params_str_for_file}.png"
+        main_plot_title = f"Prediction Ratio vs. Step Index by Region\nParameters: {group_params_title_str}"
+        
+        save_plot(fig, main_plot_title, output_subdir, plot_filename)
+    
+    logger_analysis.info(f"Per-parameter group PR vs Step plots saved to {output_subdir}")
+
+
 if __name__ == '__main__':
     if not RESULTS_JSONL_FILE.exists() or RESULTS_JSONL_FILE.stat().st_size == 0:
         logger_analysis.critical(f"Results file for analysis not found or is empty: {RESULTS_JSONL_FILE}")
@@ -491,7 +861,18 @@ if __name__ == '__main__':
         results_df = load_results_to_dataframe(RESULTS_JSONL_FILE)
         if not results_df.empty:
             metadata_and_stats_summary = {} 
-            analyze_and_plot_results(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
-            analyze_and_plot_results_scatter_pro(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
+            # analyze_and_plot_results(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
+            # analyze_and_plot_results_scatter_pro(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
+            # analyze_and_plot_tail_overall_distributions(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary)
+            analyze_and_plot_regions(results_df, FIGURES_OUTPUT_DIR, metadata_and_stats_summary) # New function call
+            plot_pr_vs_step_by_region_per_param_group(
+                df=results_df, 
+                base_output_dir=FIGURES_OUTPUT_DIR # It will create a subfolder inside this
+                # Thresholds for pr_anomaly_threshold, good_ratio_lower/upper_bound are taken from function defaults
+                # You can override them here if needed:
+                # pr_anomaly_threshold=3.0, 
+                # good_ratio_lower_bound=0.7,
+                # good_ratio_upper_bound=1.3
+            )
         else:
             logger_analysis.error("DataFrame is empty after loading. No analysis performed.")
