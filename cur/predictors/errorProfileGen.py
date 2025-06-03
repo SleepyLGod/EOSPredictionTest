@@ -16,6 +16,9 @@ RESULTS_JSONL_FILE_LIST = [
     Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250527_194051.jsonl"), # Databricks
     Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250526_151530.jsonl"), # Clean
     Path("./length_predictor_eval_results_Meta_Llama_3_70B_20250529_000246.jsonl"), # Eval
+    Path("./pro_length_predictor_eval_results_20250602_214152.jsonl"), # clean pro
+    Path("./pro_length_predictor_eval_results_20250603_002030.jsonl"), # databricks pro
+    Path("./pro_length_predictor_eval_results_20250603_015311.jsonl"), # eval pro
 ]
 FIGURES_OUTPUT_FILE_LIST = [
     Path("./eval_output/prefill_err_profiles_databricks.jsonl"),
@@ -23,9 +26,9 @@ FIGURES_OUTPUT_FILE_LIST = [
     Path("./eval_output/prefill_err_profiles_eval.jsonl"),
 ]
 
-RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[0]
+RESULTS_JSONL_FILE = RESULTS_JSONL_FILE_LIST[5]
 ERROR_PROFILE_OUTPUT_FILE = FIGURES_OUTPUT_FILE_LIST[0]
-EVAL_OUTPUT_BASE_DIR = Path("./eval_output/db")
+EVAL_OUTPUT_BASE_DIR = Path("./eval_output/eval_")
 
 ERROR_PROFILE_OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 

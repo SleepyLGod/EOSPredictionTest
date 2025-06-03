@@ -39,11 +39,11 @@ DS_NAME_ALPACA_EVAL = 'tatsu-lab/alpaca_eval' # 1
 DS_NAME_DOLLY = 'databricks/databricks-dolly-15k' # 2
 USED_PROMPT_IDS_FILE = Path("./used_prompt_ids.txt")
 # PROMPT_SOURCE_FILE = './test_prompts.json' # Path to a .json file with prompts, or use a default list
-NUM_TEST_PROMPTS = 50
-SAMPLE_PERCENTAGE = 0.01
+NUM_TEST_PROMPTS = 200
+SAMPLE_PERCENTAGE = 0.1
 ALPACA_CACHE_DIR = "./.cache/huggingface_datasets_eval_simple" # cache dir for datasets
 EVAL_CACHE_DIR = "./.cache/huggingface_datasets_eval_extra"
-OUTPUT_RESULTS_FILE_TEMPLATE = "./length_predictor_eval_results_{llm_name}_{timestamp}.jsonl" # Added timestamp
+OUTPUT_RESULTS_FILE_TEMPLATE = "./pro_length_predictor_eval_results_{timestamp}.jsonl" # Added timestamp
 DEVICE_LLM = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 DEVICE_PREDICTOR = torch.device("cuda:1" if torch.cuda.device_count() > 1 else DEVICE_LLM)
 USE_FLASH_ATTENTION_2 = False # Set to False to disable Flash Attention 2
@@ -650,6 +650,8 @@ def evaluate_length_predictor():
     # --- 3. Load Prompts ---
     prompts_data = []
     
+    decoding_param_list = []
+    
     if DS_CHOICE == 0: # "alpaca_clean"
         prompts_data = load_prompts_for_evaluation(
             ds_name=DS_NAME,
@@ -658,6 +660,7 @@ def evaluate_length_predictor():
             cache_dir=ALPACA_CACHE_DIR,
             used_ids_filepath=USED_PROMPT_IDS_FILE
         )
+        decoding_param_list = DECODING_PARAMS_LIST_CLEAN
     elif DS_CHOICE == 1: # "alpaca_eval"
         prompts_data = load_alpaca_eval_prompts(
             sample_percentage=SAMPLE_PERCENTAGE,
@@ -665,6 +668,7 @@ def evaluate_length_predictor():
             cache_dir=EVAL_CACHE_DIR,
             used_ids_set=None
         )
+        decoding_param_list = DECODING_PARAMS_LIST_EVAL
     elif DS_CHOICE == 2: # "dolly_v2"
         prompts_data = load_dolly_v2_prompts(
             sample_percentage=SAMPLE_PERCENTAGE,
@@ -672,14 +676,16 @@ def evaluate_length_predictor():
             cache_dir=EVAL_CACHE_DIR,
             used_ids_set=None
         )
+        decoding_param_list = DECODING_PARAMS_LIST_DB
     else:
         logger.error(f"Invalid dataset choice: {DS_CHOICE}. Must be 0 (alpaca_clean), 1 (alpaca_eval), or 2 (dolly_v2).")
+        decoding_param_list = DECODING_PARAMS_LIST
     
     if not prompts_data:
         logger.critical("Failed to load any prompts for evaluation. Exiting.")
         sys.exit(1)
     
-    logger.info(f"Starting evaluation with {len(prompts_data)} prompts and {len(DECODING_PARAMS_LIST)} decoding parameter sets.")
+    logger.info(f"Starting evaluation with {len(prompts_data)} prompts and {len(decoding_param_list)} decoding parameter sets.")
     
     # --- 4. Evaluation Loop - Results Written Line-by-Line ---
     # Open file once to write all results as JSON Lines
@@ -688,7 +694,7 @@ def evaluate_length_predictor():
             prompt_text = prompt_info["text"]
             prompt_id = prompt_info["id"]
             
-            for dec_params_idx, dec_params in enumerate(DECODING_PARAMS_LIST):
+            for dec_params_idx, dec_params in enumerate(decoding_param_list):
                 current_max_new_tokens_session = dec_params['max_new_tokens']
                 
                 # Validate if current_max_new_tokens_session is within normalization range for 'max_len_session'
@@ -872,7 +878,7 @@ def evaluate_length_predictor():
                         # logger.debug(f"Cache emptied for DEVICE_LLM: {DEVICE_LLM}")
                     except Exception as e_cache_llm:
                         logger.warning(f"Could not empty cache for DEVICE_LLM ({DEVICE_LLM}): {e_cache_llm}")
-
+                
                 if DEVICE_PREDICTOR.type == 'cuda' and DEVICE_PREDICTOR != DEVICE_LLM:
                     try:
                         # Set current device to DEVICE_PREDICTOR before emptying cache
