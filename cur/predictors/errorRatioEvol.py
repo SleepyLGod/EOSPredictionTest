@@ -34,7 +34,7 @@ ANNOTATION_FONT_SIZE_PRED_LEN = 6 # Font size for predicted length
 ANNOTATION_FONT_SIZE_NAN = 7    # Font size for NaN case predicted length
 ANNOTATION_OFFSET_Y = 0.03       # Offset for predicted length text above the point (in data coords)
 ERROR_RATIO_ANNOTATION_THRESHOLD = 0.2  # Only annotate points where |error_ratio - 1| < threshold
-TAIL_STEPS_COUNT = 10  # Number of final steps to plot in tail analysis
+TAIL_STEPS_COUNT = 10  # Number of final steps to show in table
 
 
 def sanitize_filename(name: str, max_len: int = 100) -> str:
@@ -127,90 +127,65 @@ def _prepare_error_ratio_data(step_data_list: list) -> tuple:
     return df_steps_orig, df_plot, df_special_nan_annotations
 
 
-def _prepare_tail_error_ratio_data(step_data_list: list) -> tuple:
-    """Prepare and calculate error ratio data for the last N steps.
+def _prepare_tail_table_data(step_data_list: list) -> pd.DataFrame:
+    """Prepare data for the last N steps table.
     
     Returns:
-        tuple: (df_tail_orig, df_tail_plot, df_tail_special_nan_annotations)
+        DataFrame with columns: step_index, actual_rest_len, predicted_rest_len, custom_error_ratio
     """
     if not step_data_list:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame()
     
     df_steps_orig = pd.DataFrame(step_data_list)
     
     # Get the last N steps
-    df_tail_orig = df_steps_orig.tail(TAIL_STEPS_COUNT).copy()
+    df_tail = df_steps_orig.tail(TAIL_STEPS_COUNT).copy()
     
-    if df_tail_orig.empty:
-        return df_tail_orig, pd.DataFrame(), pd.DataFrame()
+    if df_tail.empty:
+        return df_tail
     
     # Calculate the custom error ratio
-    df_tail_orig['error_val'] = df_tail_orig['actual_rest_len'] - df_tail_orig['predicted_rest_len']
+    df_tail['error_val'] = df_tail['actual_rest_len'] - df_tail['predicted_rest_len']
     
-    df_tail_orig['custom_error_ratio'] = np.where(
-        np.abs(df_tail_orig['actual_rest_len']) < 1e-9,
-        np.where(np.abs(df_tail_orig['predicted_rest_len']) < 0.5, 0.0, np.nan),
-        df_tail_orig['error_val'] / df_tail_orig['actual_rest_len']
+    df_tail['custom_error_ratio'] = np.where(
+        np.abs(df_tail['actual_rest_len']) < 1e-9,
+        np.where(np.abs(df_tail['predicted_rest_len']) < 0.5, 0.0, np.nan),
+        df_tail['error_val'] / df_tail['actual_rest_len']
     )
     
-    # Identify special NaN cases (Actual=0, Predicted!=0) BEFORE dropping NaNs for plotting
-    df_tail_special_nan_annotations = df_tail_orig[
-        (np.abs(df_tail_orig['actual_rest_len']) < 1e-9) &
-        (np.abs(df_tail_orig['predicted_rest_len']) >= 0.5) & # Predicted is significantly non-zero
-        (df_tail_orig['custom_error_ratio'].isna()) # Ensure it's a NaN that we want to mark
-    ].copy()
-    
-    # Prepare DataFrame for plotting (remove NaNs for the line plot)
-    df_tail_plot = df_tail_orig.dropna(subset=['custom_error_ratio']).copy()
-    
-    return df_tail_orig, df_tail_plot, df_tail_special_nan_annotations
+    return df_tail
 
 
-def _create_base_plot(df_plot: pd.DataFrame) -> tuple:
-    """Create the base plot with line and ideal line.
+def _create_base_plot_with_table(df_plot: pd.DataFrame) -> tuple:
+    """Create the base plot with line and ideal line, with space for table below.
     
     Returns:
         tuple: (fig, ax)
     """
-    fig, ax = plt.subplots(figsize=(14, 8)) # Slightly wider for annotations
+    fig, ax = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
+    plot_ax = ax[0]  # Top subplot for the plot
     
     if not df_plot.empty:
-        sns.lineplot(data=df_plot, x='step_index', y='custom_error_ratio', marker='o', markersize=5, ax=ax, color='darkcyan', label="Custom Error Ratio", zorder=2)
+        sns.lineplot(data=df_plot, x='step_index', y='custom_error_ratio', marker='o', markersize=5, ax=plot_ax, color='darkcyan', label="Custom Error Ratio", zorder=2)
     
     # Add ideal line at y=0
-    ax.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Ideal Ratio (0.0)', zorder=1)
+    plot_ax.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Ideal Ratio (0.0)', zorder=1)
     
-    return fig, ax
+    return fig, plot_ax
 
 
 def _add_predicted_length_annotations(ax, df_plot: pd.DataFrame):
     """Add predicted length annotations to regular plotted points.
-    Only annotate points where error ratio is close to 1 (indicating good predictions).
+    Only annotate points where error ratio is close to 0 (indicating good predictions).
     """
     if ANNOTATE_PREDICTED_LENGTH and not df_plot.empty:
         for _, row in df_plot.iterrows():
-            # Only annotate points where |error_ratio - 1| < threshold (close to ideal prediction)
-            if abs(row['custom_error_ratio'] - 1.0) < ERROR_RATIO_ANNOTATION_THRESHOLD:
+            # Only annotate points where |error_ratio| < threshold (close to ideal prediction)
+            if abs(row['custom_error_ratio']) < ERROR_RATIO_ANNOTATION_THRESHOLD:
                 ax.text(row['step_index'], row['custom_error_ratio'] + ANNOTATION_OFFSET_Y,
                         f"{row['actual_rest_len']:.0f}", # Show actual remaining length, not predicted
                         color='dimgray', fontsize=ANNOTATION_FONT_SIZE_PRED_LEN,
                         ha='center', va='bottom', zorder=3)
-
-
-def _add_tail_detailed_annotations(ax, df_plot: pd.DataFrame):
-    """Add detailed annotations for tail plots showing actual remaining length and error ratio.
-    Annotations are placed to the right of each point.
-    """
-    if not df_plot.empty:
-        for _, row in df_plot.iterrows():
-            # Place annotation to the right of the point
-            annotation_text = f"Actual: {row['actual_rest_len']:.0f}\nRatio: {row['custom_error_ratio']:.2f}"
-            ax.text(row['step_index'] + 0.1, row['custom_error_ratio'],
-                    annotation_text,
-                    color='darkblue', fontsize=8,
-                    ha='left', va='center', zorder=3,
-                    bbox=dict(facecolor='lightblue', alpha=0.7, edgecolor='darkblue',
-                                boxstyle='round,pad=0.3', linewidth=0.5))
 
 
 def _add_special_nan_annotations(ax, df_special_nan_annotations: pd.DataFrame):
@@ -234,14 +209,6 @@ def _set_plot_labels_and_title(ax, prompt_id: str, dec_params: dict):
     """Set plot titles and labels."""
     param_str_title = ", ".join([f"{k.replace('temperature','T').replace('repetition_penalty','RP')}={v}" for k,v in sorted(dec_params.items())])
     ax.set_title(f"Custom Error Ratio Evolution for Prompt: {prompt_id}\nParams: {param_str_title}", fontsize=14)
-    ax.set_xlabel("Decoding Step Index", fontsize=12)
-    ax.set_ylabel("Error Ratio ((Actual - Pred) / Actual)", fontsize=12)
-
-
-def _set_tail_plot_labels_and_title(ax, prompt_id: str, dec_params: dict):
-    """Set plot titles and labels for tail plots."""
-    param_str_title = ", ".join([f"{k.replace('temperature','T').replace('repetition_penalty','RP')}={v}" for k,v in sorted(dec_params.items())])
-    ax.set_title(f"Last {TAIL_STEPS_COUNT} Steps Error Ratio Evolution for Prompt: {prompt_id}\nParams: {param_str_title}", fontsize=14)
     ax.set_xlabel("Decoding Step Index", fontsize=12)
     ax.set_ylabel("Error Ratio ((Actual - Pred) / Actual)", fontsize=12)
 
@@ -318,6 +285,66 @@ def _apply_nonlinear_y_scaling(ax, df_plot: pd.DataFrame):
         ax.axhline(-2, color='gray', linestyle=':', alpha=0.5, linewidth=1)
 
 
+def _add_tail_table(fig, df_tail: pd.DataFrame):
+    """Add a table below the plot showing the last N steps data."""
+    if df_tail.empty:
+        return
+    
+    # Get the second subplot (table area)
+    axes = fig.get_axes()
+    if len(axes) < 2:
+        return
+    
+    table_ax = axes[1]  # Second subplot for table
+    table_ax.axis('off')  # Hide axes
+    
+    # Prepare table data with short column names
+    table_data = []
+    headers = ['StepNum', 'ActRLen', 'PredRLen', 'ErrRatio']
+    
+    for _, row in df_tail.iterrows():
+        step_num = int(row['step_index'])
+        act_len = int(row['actual_rest_len'])
+        pred_len = int(row['predicted_rest_len'])
+        err_ratio = row['custom_error_ratio']
+        
+        # Format error ratio
+        if pd.isna(err_ratio):
+            err_ratio_str = 'NaN'
+        else:
+            err_ratio_str = f"{err_ratio:.2f}"
+        
+        table_data.append([step_num, act_len, pred_len, err_ratio_str])
+    
+    # Create the table
+    table_obj = table_ax.table(cellText=table_data,
+                                colLabels=headers,
+                                cellLoc='center',
+                                loc='center',
+                                bbox=[0, 0, 1, 1])
+    
+    # Style the table
+    table_obj.auto_set_font_size(False)
+    table_obj.set_fontsize(9)
+    table_obj.scale(1, 1.5)
+    
+    # Style header row
+    for i in range(len(headers)):
+        table_obj[(0, i)].set_facecolor('#40466e')
+        table_obj[(0, i)].set_text_props(weight='bold', color='white')
+    
+    # Style data rows with alternating colors
+    for i in range(1, len(table_data) + 1):
+        for j in range(len(headers)):
+            if i % 2 == 0:
+                table_obj[(i, j)].set_facecolor('#f0f0f0')
+            else:
+                table_obj[(i, j)].set_facecolor('white')
+    
+    # Add title for the table
+    table_ax.set_title(f"Last {TAIL_STEPS_COUNT} Steps Details", fontsize=12, fontweight='bold', pad=10)
+
+
 def _finalize_plot(ax, df_plot: pd.DataFrame):
     """Apply final plot settings and formatting."""
     # Apply non-linear Y-axis scaling if needed
@@ -331,7 +358,6 @@ def _finalize_plot(ax, df_plot: pd.DataFrame):
     # Position legend horizontally to avoid vertical stacking
     ax.legend(loc='upper right', ncol=2, columnspacing=1.0)
     ax.grid(True, linestyle=':', alpha=0.7)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
 
 
 def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
@@ -351,8 +377,11 @@ def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
         logger.info(f"No valid custom error ratios or special NaN cases to plot for prompt {prompt_id}, params {dec_params}")
         return
     
-    # Create base plot
-    fig, ax = _create_base_plot(df_plot)
+    # Prepare tail table data
+    df_tail = _prepare_tail_table_data(step_data_list)
+    
+    # Create base plot with table layout
+    fig, ax = _create_base_plot_with_table(df_plot)
     
     # Add annotations
     _add_predicted_length_annotations(ax, df_plot)
@@ -367,56 +396,15 @@ def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
     # Finalize plot
     _finalize_plot(ax, df_plot)
     
+    # Add tail table below the plot
+    _add_tail_table(fig, df_tail)
+    
+    # Adjust layout
+    plt.tight_layout()
+    
     # Save plot
     prompt_filename_safe = sanitize_filename(prompt_id)
     plot_filename = f"prompt_{prompt_filename_safe}_custom_err_ratio_evol_annot.png"
-    full_plot_path = output_dir / plot_filename
-    save_plot_to_file(fig, full_plot_path)
-
-
-def plot_tail_error_ratio_evolution_for_prompt(
-    prompt_id: str,
-    step_data_list: list,
-    dec_params: dict,
-    output_dir: Path
-):
-    """Plot error ratio evolution for the last N decoding steps with detailed annotations."""
-    if not step_data_list:
-        logger.warning(f"No step data for prompt {prompt_id} with params {dec_params}. Skipping tail plot.")
-        return
-    
-    # Prepare tail data
-    _, df_tail_plot, df_tail_special_nan_annotations = _prepare_tail_error_ratio_data(step_data_list)
-    
-    if df_tail_plot.empty and df_tail_special_nan_annotations.empty:
-        logger.info(f"No valid tail error ratios or special NaN cases to plot for prompt {prompt_id}, params {dec_params}")
-        return
-    
-    # Create base plot
-    fig, ax = _create_base_plot(df_tail_plot)
-    
-    # Add detailed annotations for all points (showing actual remaining length and error ratio)
-    _add_tail_detailed_annotations(ax, df_tail_plot)
-    _add_special_nan_annotations(ax, df_tail_special_nan_annotations)
-    
-    # Set labels and title
-    _set_tail_plot_labels_and_title(ax, prompt_id, dec_params)
-    
-    # Add statistics annotation
-    _add_statistics_annotation(ax, df_tail_plot)
-    
-    # Finalize plot (with wider x-axis range to accommodate right-side annotations)
-    if not df_tail_plot.empty:
-        x_min = df_tail_plot['step_index'].min()
-        x_max = df_tail_plot['step_index'].max()
-        x_range = x_max - x_min if x_max > x_min else 1
-        ax.set_xlim(x_min - 0.5, x_max + x_range * 0.4)  # Extra space on right for annotations
-    
-    _finalize_plot(ax, df_tail_plot)
-    
-    # Save plot
-    prompt_filename_safe = sanitize_filename(prompt_id)
-    plot_filename = f"prompt_{prompt_filename_safe}_tail_{TAIL_STEPS_COUNT}_steps_err_ratio.png"
     full_plot_path = output_dir / plot_filename
     save_plot_to_file(fig, full_plot_path)
 
@@ -449,26 +437,13 @@ if __name__ == "__main__":
                     
                     # logger.info(f"Processing parameter group: {current_params_dict} -> saving in {param_group_output_dir}") # Too verbose for many groups
                     
-                    # Create TAIL subfolder for tail plots
-                    tail_folder_name = f"TAIL_MNT{current_params_dict.get('max_new_tokens', 'UNK')}_{param_group_folder_name}"
-                    tail_output_dir = base_output_dir / sanitize_filename(tail_folder_name)
-                    tail_output_dir.mkdir(parents=True, exist_ok=True)
-                    
                     for prompt_id_str, list_of_steps in tqdm(prompts_data_dict.items(), desc=f"Prompts in {param_group_folder_name}", leave=False):
-                        # Generate regular evolution plot
-                        # plot_custom_error_ratio_evolution_for_prompt_annotated( # Call the new annotated function
-                        #     prompt_id=prompt_id_str,
-                        #     step_data_list=list_of_steps,
-                        #     dec_params=current_params_dict,
-                        #     output_dir=param_group_output_dir
-                        # )
-                        
-                        # Generate tail plot (last 10 steps)
-                        plot_tail_error_ratio_evolution_for_prompt(
+                        # Generate evolution plot with tail table
+                        plot_custom_error_ratio_evolution_for_prompt_annotated(
                             prompt_id=prompt_id_str,
                             step_data_list=list_of_steps,
                             dec_params=current_params_dict,
-                            output_dir=tail_output_dir
+                            output_dir=param_group_output_dir
                         )
                 
                 logger.info("All annotated plotting complete.")
