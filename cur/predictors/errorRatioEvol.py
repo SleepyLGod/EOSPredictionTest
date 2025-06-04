@@ -35,6 +35,8 @@ ANNOTATION_FONT_SIZE_NAN = 7    # Font size for NaN case predicted length
 ANNOTATION_OFFSET_Y = 0.03       # Offset for predicted length text above the point (in data coords)
 ERROR_RATIO_ANNOTATION_THRESHOLD = 0.2  # Only annotate points where |error_ratio - 1| < threshold
 TAIL_STEPS_COUNT = 10  # Number of final steps to show in table
+ACCURATE_PREDICTION_THRESHOLD = 0.1  # Threshold for considering a prediction "accurate" (|error_ratio| < threshold)
+MIN_ACTUAL_REST_LEN_FOR_FITTING = 5  # Minimum actual_rest_len to include in curve fitting
 
 
 def sanitize_filename(name: str, max_len: int = 100) -> str:
@@ -156,22 +158,23 @@ def _prepare_tail_table_data(step_data_list: list) -> pd.DataFrame:
     return df_tail
 
 
-def _create_base_plot_with_table(df_plot: pd.DataFrame) -> tuple:
-    """Create the base plot with line and ideal line, with space for table below.
+def _create_base_plot_with_prediction_and_table(df_plot: pd.DataFrame) -> tuple:
+    """Create the base plot with error ratio, prediction length plot, and table below.
     
     Returns:
-        tuple: (fig, ax)
+        tuple: (fig, error_ratio_ax, prediction_ax)
     """
-    fig, ax = plt.subplots(2, 1, figsize=(14, 10), gridspec_kw={'height_ratios': [3, 1]})
-    plot_ax = ax[0]  # Top subplot for the plot
+    fig, ax = plt.subplots(3, 1, figsize=(14, 14), gridspec_kw={'height_ratios': [2, 1.5, 0.8]})
+    error_ratio_ax = ax[0]  # Top subplot for error ratio
+    prediction_ax = ax[1]   # Middle subplot for prediction length
     
     if not df_plot.empty:
-        sns.lineplot(data=df_plot, x='step_index', y='custom_error_ratio', marker='o', markersize=5, ax=plot_ax, color='darkcyan', label="Custom Error Ratio", zorder=2)
+        sns.lineplot(data=df_plot, x='step_index', y='custom_error_ratio', marker='o', markersize=5, ax=error_ratio_ax, color='darkcyan', label="Custom Error Ratio", zorder=2)
     
-    # Add ideal line at y=0
-    plot_ax.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Ideal Ratio (0.0)', zorder=1)
+    # Add ideal line at y=0 for error ratio
+    error_ratio_ax.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Ideal Ratio (0.0)', zorder=1)
     
-    return fig, plot_ax
+    return fig, error_ratio_ax, prediction_ax
 
 
 def _add_predicted_length_annotations(ax, df_plot: pd.DataFrame):
@@ -186,6 +189,217 @@ def _add_predicted_length_annotations(ax, df_plot: pd.DataFrame):
                         f"{row['actual_rest_len']:.0f}", # Show actual remaining length, not predicted
                         color='dimgray', fontsize=ANNOTATION_FONT_SIZE_PRED_LEN,
                         ha='center', va='bottom', zorder=3)
+
+
+def _find_accurate_predictions(df_plot: pd.DataFrame, threshold: float = ACCURATE_PREDICTION_THRESHOLD) -> list:
+    """Find the first three decoding steps with accurate predictions (error ratio close to 0)."""
+    if df_plot.empty:
+        return []
+    
+    # Find points where |error_ratio| < threshold
+    accurate_points = df_plot[df_plot['custom_error_ratio'].abs() < threshold].copy()
+    accurate_points = accurate_points.sort_values('step_index')
+    
+    # Return first three
+    return accurate_points.head(3)['step_index'].tolist()
+
+
+def _add_accurate_prediction_markers(ax, df_plot: pd.DataFrame):
+    """Add special markers for the first three accurate predictions."""
+    accurate_steps = _find_accurate_predictions(df_plot)
+    
+    if not accurate_steps:
+        return
+    
+    for i, step_idx in enumerate(accurate_steps):
+        step_data = df_plot[df_plot['step_index'] == step_idx]
+        if not step_data.empty:
+            row = step_data.iloc[0]
+            # Add star marker
+            ax.scatter(row['step_index'], row['custom_error_ratio'],
+                        marker='*', s=200, color='gold', edgecolor='orange',
+                        linewidth=2, zorder=5, label=f'Accurate Pred #{i+1}' if i == 0 else "")
+            
+            # Add text annotation
+            ax.text(row['step_index'], row['custom_error_ratio'] + 0.05,
+                    f'#{i+1}\nStep {int(step_idx)}',
+                    ha='center', va='bottom', fontsize=8, fontweight='bold',
+                    color='darkorange', zorder=6)
+
+
+def _fit_and_plot_curve(ax, df_plot: pd.DataFrame, dec_params: dict, min_actual_len: int = MIN_ACTUAL_REST_LEN_FOR_FITTING):
+    """Fit and plot both linear and quadratic curves for error ratio evolution."""
+    if df_plot.empty:
+        return
+    
+    # Get max_new_tokens from decoding parameters
+    max_new_tokens = dec_params.get('max_new_tokens', float('inf'))
+    
+    # Filter data for fitting with stricter criteria
+    df_fit = df_plot[
+        (df_plot['actual_rest_len'] >= min_actual_len) &  # Exclude small actual_rest_len
+        (df_plot['step_index'] + df_plot['predicted_rest_len'] <= max_new_tokens)  # Exclude anomalous predictions
+    ].copy()
+    
+    if len(df_fit) < 3:  # Need at least 3 points for fitting
+        logger.info(f"Insufficient data points for fitting after filtering: {len(df_fit)} points")
+        return
+    
+    x_data = df_fit['step_index'].values
+    y_data = df_fit['custom_error_ratio'].values
+    
+    logger.info(f"Fitting curves with {len(df_fit)} points (filtered from {len(df_plot)} total points)")
+    
+    # Try both linear and quadratic fits
+    try:
+        x_range = np.linspace(x_data.min(), x_data.max(), 100)
+        
+        # Linear fit
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+        linear_formula = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+        
+        # Plot linear fit
+        y_linear = linear_poly(x_range)
+        ax.plot(x_range, y_linear, '--', color='blue', linewidth=2,
+                label=f'Linear Fit (R²={linear_r2:.3f})', zorder=3)
+        
+        # Quadratic fit (if enough points)
+        if len(df_fit) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+            quad_formula = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
+            
+            # Plot quadratic fit
+            y_quad = quad_poly(x_range)
+            ax.plot(x_range, y_quad, '-.', color='purple', linewidth=2,
+                    label=f'Quadratic Fit (R²={quad_r2:.3f})', zorder=3)
+            
+            # Add formulas annotation
+            annotation_text = f"Linear: {linear_formula}\nR² = {linear_r2:.3f}\n\nQuadratic: {quad_formula}\nR² = {quad_r2:.3f}"
+        else:
+            annotation_text = f"Linear: {linear_formula}\nR² = {linear_r2:.3f}\n\n(Need ≥5 points for quadratic)"
+        
+        # Add formula annotation
+        ax.text(0.02, 0.98, annotation_text,
+                transform=ax.transAxes, fontsize=8, verticalalignment='top',
+                bbox=dict(boxstyle='round,pad=0.3', fc='lavender', alpha=0.8))
+    
+    except (np.linalg.LinAlgError, np.RankWarning) as e:
+        logger.warning(f"Curve fitting failed: {e}")
+        pass
+
+
+def _prepare_prediction_length_data(step_data_list: list) -> pd.DataFrame:
+    """Prepare data for exact prediction length plot."""
+    if not step_data_list:
+        return pd.DataFrame()
+    
+    df_steps = pd.DataFrame(step_data_list)
+    
+    if df_steps.empty or 'current_full_sequence_len_for_pred' not in df_steps.columns:
+        return pd.DataFrame()
+    
+    # Calculate exact prediction length and ideal length
+    df_steps['exact_prediction_length'] = df_steps['current_full_sequence_len_for_pred'] + df_steps['predicted_rest_len']
+    df_steps['ideal_length'] = df_steps['current_full_sequence_len_for_pred'] + df_steps['actual_rest_len']
+    
+    return df_steps
+
+
+def _plot_prediction_length_evolution(ax, df_steps: pd.DataFrame):
+    """Plot exact prediction length evolution with ideal line and fitting curve."""
+    if df_steps.empty:
+        return
+    
+    # Plot prediction length evolution
+    sns.lineplot(data=df_steps, x='step_index', y='exact_prediction_length',
+                marker='o', markersize=4, ax=ax, color='darkgreen',
+                label="Exact Prediction Length", zorder=2)
+    
+    # Calculate and plot ideal length (final actual total length)
+    if not df_steps.empty and 'ideal_length' in df_steps.columns:
+        # The ideal length should be the final actual total length
+        final_actual_length = df_steps['ideal_length'].iloc[-1] if len(df_steps) > 0 else None
+        if final_actual_length is not None:
+            ax.axhline(final_actual_length, color='red', linestyle='--', linewidth=1.5,
+                        label=f'Ideal Length ({final_actual_length:.0f})', zorder=1)
+    
+    # Fit and plot curve for prediction length
+    _fit_prediction_length_curve(ax, df_steps)
+    
+    # Set labels
+    ax.set_xlabel("Decoding Step Index", fontsize=12)
+    ax.set_ylabel("Exact Prediction Length", fontsize=12)
+    ax.set_title("Exact Prediction Length Evolution", fontsize=14)
+    
+    # Ensure all points are within axis limits
+    if not df_steps.empty:
+        y_min = df_steps['exact_prediction_length'].min()
+        y_max = df_steps['exact_prediction_length'].max()
+        y_range = y_max - y_min
+        padding = max(y_range * 0.1, 1)  # At least 1 unit padding
+        ax.set_ylim(y_min - padding, y_max + padding)
+    
+    ax.legend(loc='upper right', ncol=2)
+    ax.grid(True, linestyle=':', alpha=0.7)
+
+
+def _fit_prediction_length_curve(ax, df_steps: pd.DataFrame):
+    """Fit and plot curve for prediction length evolution."""
+    if len(df_steps) < 3:
+        return
+    
+    x_data = df_steps['step_index'].values
+    y_data = df_steps['exact_prediction_length'].values
+    
+    try:
+        # Try linear fit first
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+        
+        # Try quadratic fit if we have enough points
+        if len(df_steps) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+            
+            if quad_r2 > linear_r2:
+                coeffs = quad_coeffs
+                poly = quad_poly
+                r2 = quad_r2
+                fit_type = "Quadratic"
+                formula = f"y = {coeffs[0]:.4f}x² + {coeffs[1]:.4f}x + {coeffs[2]:.4f}"
+            else:
+                coeffs = linear_coeffs
+                poly = linear_poly
+                r2 = linear_r2
+                fit_type = "Linear"
+                formula = f"y = {coeffs[0]:.4f}x + {coeffs[1]:.4f}"
+        else:
+            coeffs = linear_coeffs
+            poly = linear_poly
+            r2 = linear_r2
+            fit_type = "Linear"
+            formula = f"y = {coeffs[0]:.4f}x + {coeffs[1]:.4f}"
+        
+        # Plot the fitted curve
+        x_range = np.linspace(x_data.min(), x_data.max(), 100)
+        y_fitted = poly(x_range)
+        
+        ax.plot(x_range, y_fitted, '--', color='darkblue', linewidth=2,
+                label=f'{fit_type} Fit (R²={r2:.3f})', zorder=3)
+        
+        # Add formula annotation
+        ax.text(0.02, 0.02, f'{fit_type} Fit:\n{formula}\nR² = {r2:.3f}',
+                transform=ax.transAxes, fontsize=9, verticalalignment='bottom',
+                bbox=dict(boxstyle='round,pad=0.3', fc='lightcyan', alpha=0.8))
+    
+    except (np.linalg.LinAlgError, np.RankWarning):
+        pass
 
 
 def _add_special_nan_annotations(ax, df_special_nan_annotations: pd.DataFrame):
@@ -286,16 +500,16 @@ def _apply_nonlinear_y_scaling(ax, df_plot: pd.DataFrame):
 
 
 def _add_tail_table(fig, df_tail: pd.DataFrame):
-    """Add a table below the plot showing the last N steps data."""
+    """Add a table below the plots showing the last N steps data."""
     if df_tail.empty:
         return
     
-    # Get the second subplot (table area)
+    # Get the third subplot (table area)
     axes = fig.get_axes()
-    if len(axes) < 2:
+    if len(axes) < 3:
         return
     
-    table_ax = axes[1]  # Second subplot for table
+    table_ax = axes[2]  # Third subplot for table
     table_ax.axis('off')  # Hide axes
     
     # Prepare table data with short column names
@@ -307,6 +521,10 @@ def _add_tail_table(fig, df_tail: pd.DataFrame):
         act_len = int(row['actual_rest_len'])
         pred_len = int(row['predicted_rest_len'])
         err_ratio = row['custom_error_ratio']
+        
+        # Debug: Log negative predicted lengths
+        if pred_len < 0:
+            logger.warning(f"Negative predicted_rest_len detected: step={step_num}, pred_len={pred_len}, act_len={act_len}")
         
         # Format error ratio
         if pd.isna(err_ratio):
@@ -380,23 +598,31 @@ def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
     # Prepare tail table data
     df_tail = _prepare_tail_table_data(step_data_list)
     
-    # Create base plot with table layout
-    fig, ax = _create_base_plot_with_table(df_plot)
+    # Prepare prediction length data
+    df_prediction = _prepare_prediction_length_data(step_data_list)
     
-    # Add annotations
-    _add_predicted_length_annotations(ax, df_plot)
-    _add_special_nan_annotations(ax, df_special_nan_annotations)
+    # Create base plot with prediction plot and table layout
+    fig, error_ratio_ax, prediction_ax = _create_base_plot_with_prediction_and_table(df_plot)
     
-    # Set labels and title
-    _set_plot_labels_and_title(ax, prompt_id, dec_params)
+    # Add annotations to error ratio plot
+    _add_predicted_length_annotations(error_ratio_ax, df_plot)
+    _add_special_nan_annotations(error_ratio_ax, df_special_nan_annotations)
+    _add_accurate_prediction_markers(error_ratio_ax, df_plot)
+    _fit_and_plot_curve(error_ratio_ax, df_plot, dec_params)
     
-    # Add statistics annotation
-    _add_statistics_annotation(ax, df_plot)
+    # Set labels and title for error ratio plot
+    _set_plot_labels_and_title(error_ratio_ax, prompt_id, dec_params)
     
-    # Finalize plot
-    _finalize_plot(ax, df_plot)
+    # Add statistics annotation to error ratio plot
+    _add_statistics_annotation(error_ratio_ax, df_plot)
     
-    # Add tail table below the plot
+    # Finalize error ratio plot
+    _finalize_plot(error_ratio_ax, df_plot)
+    
+    # Plot prediction length evolution
+    _plot_prediction_length_evolution(prediction_ax, df_prediction)
+    
+    # Add tail table below the plots
     _add_tail_table(fig, df_tail)
     
     # Adjust layout
@@ -429,7 +655,7 @@ if __name__ == "__main__":
                     
                     param_group_foldername_parts = []
                     for k, v in sorted(current_params_dict.items()):
-                        k_short = k.replace("temperature", "T").replace("repetition_penalty", "RP").replace("max_new_tokens", "MNT").replace("top_k", "K")
+                        k_short = k.replace("temperature", "T").replace("repetition_penalty", "RP").replace("max_new_tokens", "_MNT").replace("top_k", "K")
                         param_group_foldername_parts.append(f"{k_short}{v}")
                     param_group_folder_name = "_".join(param_group_foldername_parts)
                     param_group_output_dir = base_output_dir / sanitize_filename(param_group_folder_name)
