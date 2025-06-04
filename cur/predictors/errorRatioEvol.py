@@ -7,6 +7,7 @@ import seaborn as sns
 import logging
 from tqdm import tqdm
 import re
+from datetime import datetime
 
 
 # --- Logging Setup ---
@@ -402,6 +403,211 @@ def _fit_prediction_length_curve(ax, df_steps: pd.DataFrame):
         pass
 
 
+def _extract_error_ratio_curve_formulas(df_plot: pd.DataFrame, dec_params: dict, min_actual_len: int = MIN_ACTUAL_REST_LEN_FOR_FITTING) -> dict:
+    """Extract curve formulas for error ratio evolution without plotting.
+    Returns:
+        dict: Contains linear and quadratic formulas with R² values
+    """
+    result = {
+        'linear_formula': None,
+        'linear_r2': None,
+        'quadratic_formula': None,
+        'quadratic_r2': None,
+        'data_points_used': 0
+    }
+    
+    if df_plot.empty:
+        return result
+    
+    # Get max_new_tokens from decoding parameters
+    max_new_tokens = dec_params.get('max_new_tokens', float('inf'))
+    
+    # Filter data for fitting with stricter criteria
+    df_fit = df_plot[
+        (df_plot['actual_rest_len'] >= min_actual_len) &  # Exclude small actual_rest_len
+        (df_plot['step_index'] + df_plot['predicted_rest_len'] <= max_new_tokens)  # Exclude anomalous predictions
+    ].copy()
+    
+    if len(df_fit) < 3:  # Need at least 3 points for fitting
+        return result
+    
+    x_data = df_fit['step_index'].values
+    y_data = df_fit['custom_error_ratio'].values
+    result['data_points_used'] = len(df_fit)
+    
+    try:
+        # Linear fit
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+        result['linear_formula'] = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+        result['linear_r2'] = linear_r2
+        
+        # Quadratic fit (if enough points)
+        if len(df_fit) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+            result['quadratic_formula'] = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
+            result['quadratic_r2'] = quad_r2
+    
+    except (np.linalg.LinAlgError, np.RankWarning) as e:
+        logger.warning(f"Error ratio curve fitting failed: {e}")
+    
+    return result
+
+
+def _extract_prediction_length_curve_formula(df_steps: pd.DataFrame) -> dict:
+    """Extract curve formula for prediction length evolution without plotting.
+    Returns:
+        dict: Contains best fit formula with R² value
+    """
+    result = {
+        'formula': None,
+        'r2': None,
+        'fit_type': None,
+        'data_points_used': 0
+    }
+    
+    if len(df_steps) < 3:
+        return result
+    
+    x_data = df_steps['step_index'].values
+    y_data = df_steps['exact_prediction_length'].values
+    result['data_points_used'] = len(df_steps)
+    
+    try:
+        # Try linear fit first
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+        
+        # Try quadratic fit if we have enough points
+        if len(df_steps) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+            
+            if quad_r2 > linear_r2:
+                result['formula'] = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
+                result['r2'] = quad_r2
+                result['fit_type'] = "Quadratic"
+            else:
+                result['formula'] = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+                result['r2'] = linear_r2
+                result['fit_type'] = "Linear"
+        else:
+            result['formula'] = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+            result['r2'] = linear_r2
+            result['fit_type'] = "Linear"
+    
+    except (np.linalg.LinAlgError, np.RankWarning) as e:
+        logger.warning(f"Prediction length curve fitting failed: {e}")
+    
+    return result
+
+
+def _log_prompt_analysis_data(prompt_id: str, step_data_list: list, dec_params: dict) -> dict:
+    """Extract and log analysis data for a single prompt.
+    Returns:
+        dict: Contains all analysis data for the prompt
+    """
+    if not step_data_list:
+        return {
+            'prompt_id': prompt_id,
+            'total_decoding_steps': 0,
+            'error_ratio_curves': {},
+            'prediction_length_curve': {},
+            'analysis_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    
+    # Prepare data
+    _, df_plot, _ = _prepare_error_ratio_data(step_data_list)
+    df_prediction = _prepare_prediction_length_data(step_data_list)
+    
+    # Extract curve formulas
+    error_ratio_curves = _extract_error_ratio_curve_formulas(df_plot, dec_params)
+    prediction_length_curve = _extract_prediction_length_curve_formula(df_prediction)
+    
+    # Calculate total decoding steps
+    total_steps = len(step_data_list) if step_data_list else 0
+    
+    analysis_data = {
+        'prompt_id': prompt_id,
+        'total_decoding_steps': total_steps,
+        'error_ratio_curves': error_ratio_curves,
+        'prediction_length_curve': prediction_length_curve,
+        'analysis_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    return analysis_data
+
+
+def _save_parameter_group_log(param_group_data: list, dec_params: dict, output_dir: Path):
+    """Save analysis log for a parameter group.
+    Args:
+        param_group_data: List of analysis data dictionaries for all prompts in this parameter group
+        dec_params: Decoding parameters for this group
+        output_dir: Output directory for the parameter group
+    """
+    if not param_group_data:
+        logger.warning("No data to save for parameter group log")
+        return
+    
+    # Create log filename
+    log_filename = "parameter_group_analysis_log.txt"
+    log_path = output_dir / log_filename
+    
+    try:
+        with open(log_path, 'w', encoding='utf-8') as f:
+            # Write header
+            param_str = ", ".join([f"{k}={v}" for k, v in sorted(dec_params.items())])
+            f.write(f"Parameter Group Analysis Log\n")
+            f.write(f"{'=' * 50}\n")
+            f.write(f"Parameter Group: {param_str}\n")
+            f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Prompts: {len(param_group_data)}\n")
+            f.write(f"{'=' * 50}\n\n")
+            
+            # Write data for each prompt
+            for i, prompt_data in enumerate(param_group_data, 1):
+                f.write(f"Prompt #{i}: {prompt_data['prompt_id']}\n")
+                f.write(f"{'-' * 40}\n")
+                f.write(f"Total Decoding Steps: {prompt_data['total_decoding_steps']}\n")
+                f.write(f"Analysis Timestamp: {prompt_data['analysis_timestamp']}\n\n")
+                
+                # Error ratio curves
+                error_curves = prompt_data['error_ratio_curves']
+                f.write("Error Ratio Curves:\n")
+                if error_curves['linear_formula']:
+                    f.write(f"  - Linear: {error_curves['linear_formula']} (R² = {error_curves['linear_r2']:.3f})\n")
+                else:
+                    f.write("  - Linear: Not available (insufficient data)\n")
+                
+                if error_curves['quadratic_formula']:
+                    f.write(f"  - Quadratic: {error_curves['quadratic_formula']} (R² = {error_curves['quadratic_r2']:.3f})\n")
+                else:
+                    f.write("  - Quadratic: Not available (insufficient data)\n")
+                
+                f.write(f"  - Data points used for fitting: {error_curves['data_points_used']}\n\n")
+                
+                # Prediction length curve
+                pred_curve = prompt_data['prediction_length_curve']
+                f.write("Prediction Length Curve:\n")
+                if pred_curve['formula']:
+                    f.write(f"  - Best Fit ({pred_curve['fit_type']}): {pred_curve['formula']} (R² = {pred_curve['r2']:.3f})\n")
+                else:
+                    f.write("  - Best Fit: Not available (insufficient data)\n")
+                
+                f.write(f"  - Data points used for fitting: {pred_curve['data_points_used']}\n")
+                f.write(f"\n{'=' * 50}\n\n")
+                
+        logger.info(f"Parameter group analysis log saved: {log_path}")
+    
+    except Exception as e:
+        logger.error(f"Failed to save parameter group log {log_path}: {e}")
+
+
 def _add_special_nan_annotations(ax, df_special_nan_annotations: pd.DataFrame):
     """Add annotations for special NaN cases (Actual=0, Predicted!=0)."""
     if not df_special_nan_annotations.empty:
@@ -663,14 +869,32 @@ if __name__ == "__main__":
                     
                     # logger.info(f"Processing parameter group: {current_params_dict} -> saving in {param_group_output_dir}") # Too verbose for many groups
                     
+                    # Collect analysis data for this parameter group
+                    param_group_analysis_data = []
+                    
                     for prompt_id_str, list_of_steps in tqdm(prompts_data_dict.items(), desc=f"Prompts in {param_group_folder_name}", leave=False):
-                        # Generate evolution plot with tail table
-                        plot_custom_error_ratio_evolution_for_prompt_annotated(
+                        # Generate evolution plot with tail table (existing functionality)
+                        # plot_custom_error_ratio_evolution_for_prompt_annotated(
+                        #     prompt_id=prompt_id_str,
+                        #     step_data_list=list_of_steps,
+                        #     dec_params=current_params_dict,
+                        #     output_dir=param_group_output_dir
+                        # )
+                        
+                        # Extract and collect analysis data for logging (new functionality)
+                        prompt_analysis = _log_prompt_analysis_data(
                             prompt_id=prompt_id_str,
                             step_data_list=list_of_steps,
-                            dec_params=current_params_dict,
-                            output_dir=param_group_output_dir
+                            dec_params=current_params_dict
                         )
+                        param_group_analysis_data.append(prompt_analysis)
+                    
+                    # Save parameter group analysis log (new functionality)
+                    _save_parameter_group_log(
+                        param_group_data=param_group_analysis_data,
+                        dec_params=current_params_dict,
+                        output_dir=param_group_output_dir
+                    )
                 
                 logger.info("All annotated plotting complete.")
                 logger.info(f"Output saved in base directory: {base_output_dir}")
