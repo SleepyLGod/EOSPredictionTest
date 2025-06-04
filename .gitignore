@@ -167,3 +167,4 @@ cur/predictors/used_prompt_ids.txt
 cur/predictors/*.jsonl
 cur/predictors/results/
 cur/predictors/logs/
+cur/predictors/eval_output/*
