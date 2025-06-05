@@ -543,12 +543,135 @@ def _log_prompt_analysis_data(prompt_id: str, step_data_list: list, dec_params: 
     return analysis_data
 
 
-def _save_parameter_group_log(param_group_data: list, dec_params: dict, output_dir: Path):
+def _analyze_error_ratio_zero_crossing(param_group_data: list, step_data_dict: dict) -> dict:
+    """Analyze error ratio zero-crossing prediction accuracy.
+    Args:
+        param_group_data: List of analysis data dictionaries for all prompts
+        step_data_dict: Dictionary mapping prompt_id to step_data_list for actual data lookup
+    Returns:
+        dict: Analysis results including statistics and detailed prompt information
+    """
+    total_prompts = len(param_group_data)
+    valid_fits = []
+    accurate_zero_crossings = []
+    
+    for prompt_data in param_group_data:
+        prompt_id = prompt_data['prompt_id']
+        error_curves = prompt_data['error_ratio_curves']
+        
+        # Check if linear fit is available and has reasonable quality
+        if (error_curves['linear_formula'] and
+            error_curves['linear_r2'] is not None and
+            error_curves['linear_r2'] >= 0.05 and  # Minimum R² threshold
+            error_curves['data_points_used'] >= 5):  # Minimum data points
+            
+            # Parse linear formula: y = ax + b
+            formula = error_curves['linear_formula']
+            try:
+                # Extract coefficients from formula like "y = -0.0734x + -0.7306"
+                parts = formula.replace('y = ', '').replace('x', '').split(' + ')
+                if len(parts) == 2:
+                    slope = float(parts[0])
+                    intercept = float(parts[1])
+                elif ' - ' in formula:
+                    # Handle negative intercept: "y = -0.0734x + -0.7306" or "y = -0.0734x - 0.7306"
+                    formula_clean = formula.replace('y = ', '')
+                    if '+ -' in formula_clean:
+                        slope_part, intercept_part = formula_clean.split('+ -')
+                        slope = float(slope_part.replace('x', '').strip())
+                        intercept = -float(intercept_part.strip())
+                    elif ' - ' in formula_clean:
+                        slope_part, intercept_part = formula_clean.split(' - ')
+                        slope = float(slope_part.replace('x', '').strip())
+                        intercept = -float(intercept_part.strip())
+                    else:
+                        continue
+                else:
+                    continue
+                
+                # Calculate zero-crossing point: when y = 0, x = -b/a
+                if abs(slope) < 1e-6:  # Avoid division by very small numbers
+                    continue
+                
+                predicted_step = -intercept / slope
+                
+                # Check if predicted step is reasonable (positive and not too large)
+                if predicted_step < 0 or predicted_step > 1000:
+                    continue
+                
+                valid_fits.append({
+                    'prompt_id': prompt_id,
+                    'slope': slope,
+                    'intercept': intercept,
+                    'r2': error_curves['linear_r2'],
+                    'predicted_step': predicted_step,
+                    'data_points': error_curves['data_points_used']
+                })
+                
+                # Check actual error ratio at predicted step
+                if prompt_id in step_data_dict:
+                    step_data_list = step_data_dict[prompt_id]
+                    
+                    # Find the step closest to predicted_step
+                    closest_step_data = None
+                    min_distance = float('inf')
+                    
+                    for step_data in step_data_list:
+                        step_index = step_data.get('step_index', 0)
+                        distance = abs(step_index - predicted_step)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_step_data = step_data
+                    
+                    if closest_step_data and min_distance <= 2.0:  # Within 2 steps tolerance
+                        # Calculate actual error ratio for this step
+                        actual_rest_len = closest_step_data.get('actual_rest_len', 0)
+                        predicted_rest_len = closest_step_data.get('predicted_rest_len', 0)
+                        
+                        if actual_rest_len > 0:
+                            actual_error_ratio = (predicted_rest_len - actual_rest_len) / actual_rest_len
+                        else:
+                            actual_error_ratio = float('inf') if predicted_rest_len > 0 else 0.0
+                        
+                        # Check if actual error ratio is close to 0 (within -0.2 to 0.2)
+                        if -0.2 <= actual_error_ratio <= 0.2:
+                            accurate_zero_crossings.append({
+                                'prompt_id': prompt_id,
+                                'slope': slope,
+                                'intercept': intercept,
+                                'r2': error_curves['linear_r2'],
+                                'predicted_step': predicted_step,
+                                'actual_step': closest_step_data.get('step_index', 0),
+                                'actual_error_ratio': actual_error_ratio,
+                                'step_distance': min_distance
+                            })
+                        
+            except (ValueError, IndexError, ZeroDivisionError) as e:
+                # Skip prompts with parsing errors
+                continue
+    
+    # Calculate statistics
+    valid_fit_ratio = len(valid_fits) / total_prompts if total_prompts > 0 else 0
+    accurate_ratio = len(accurate_zero_crossings) / len(valid_fits) if len(valid_fits) > 0 else 0
+    
+    return {
+        'total_prompts': total_prompts,
+        'valid_fits_count': len(valid_fits),
+        'valid_fit_ratio': valid_fit_ratio,
+        'accurate_zero_crossings_count': len(accurate_zero_crossings),
+        'accurate_ratio': accurate_ratio,
+        'valid_fits': valid_fits,
+        'accurate_zero_crossings': accurate_zero_crossings
+    }
+
+
+def _save_parameter_group_log(param_group_data: list, dec_params: dict, output_dir: Path, step_data_dict: dict = None):
     """Save analysis log for a parameter group.
     Args:
         param_group_data: List of analysis data dictionaries for all prompts in this parameter group
         dec_params: Decoding parameters for this group
         output_dir: Output directory for the parameter group
+        step_data_dict: Dictionary mapping prompt_id to step_data_list for zero-crossing analysis
     """
     if not param_group_data:
         logger.warning("No data to save for parameter group log")
@@ -601,7 +724,35 @@ def _save_parameter_group_log(param_group_data: list, dec_params: dict, output_d
                 
                 f.write(f"  - Data points used for fitting: {pred_curve['data_points_used']}\n")
                 f.write(f"\n{'=' * 50}\n\n")
+        
+        # Perform zero-crossing analysis if step data is provided
+        if step_data_dict:
+            zero_crossing_analysis = _analyze_error_ratio_zero_crossing(param_group_data, step_data_dict)
+            
+            # Append zero-crossing analysis to the log file
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'=' * 60}\n")
+                f.write(f"ERROR RATIO ZERO-CROSSING ANALYSIS\n")
+                f.write(f"{'=' * 60}\n\n")
                 
+                f.write(f"Total prompts: {zero_crossing_analysis['total_prompts']}\n")
+                f.write(f"Prompts with valid linear fits: {zero_crossing_analysis['valid_fits_count']} "
+                        f"({zero_crossing_analysis['valid_fit_ratio']:.1%})\n")
+                f.write(f"Prompts with accurate zero-crossing prediction: {zero_crossing_analysis['accurate_zero_crossings_count']} "
+                        f"({zero_crossing_analysis['accurate_ratio']:.1%} of valid fits)\n\n")
+                
+                if zero_crossing_analysis['accurate_zero_crossings']:
+                    f.write("Accurate Zero-Crossing Prompts:\n")
+                    f.write(f"{'Prompt ID':<30} {'Slope':<10} {'Intercept':<10} {'R²':<8} {'Pred.Step':<10} {'Act.Step':<10} {'Act.Error':<10}\n")
+                    f.write(f"{'-' * 100}\n")
+                    
+                    for item in zero_crossing_analysis['accurate_zero_crossings']:
+                        f.write(f"{item['prompt_id']:<30} {item['slope']:<10.4f} {item['intercept']:<10.4f} "
+                                f"{item['r2']:<8.3f} {item['predicted_step']:<10.2f} {item['actual_step']:<10} "
+                                f"{item['actual_error_ratio']:<10.3f}\n")
+                
+                f.write(f"\n{'=' * 60}\n")
+        
         logger.info(f"Parameter group analysis log saved: {log_path}")
     
     except Exception as e:
@@ -874,12 +1025,12 @@ if __name__ == "__main__":
                     
                     for prompt_id_str, list_of_steps in tqdm(prompts_data_dict.items(), desc=f"Prompts in {param_group_folder_name}", leave=False):
                         # Generate evolution plot with tail table (existing functionality)
-                        # plot_custom_error_ratio_evolution_for_prompt_annotated(
-                        #     prompt_id=prompt_id_str,
-                        #     step_data_list=list_of_steps,
-                        #     dec_params=current_params_dict,
-                        #     output_dir=param_group_output_dir
-                        # )
+                        plot_custom_error_ratio_evolution_for_prompt_annotated(
+                            prompt_id=prompt_id_str,
+                            step_data_list=list_of_steps,
+                            dec_params=current_params_dict,
+                            output_dir=param_group_output_dir
+                        )
                         
                         # Extract and collect analysis data for logging (new functionality)
                         prompt_analysis = _log_prompt_analysis_data(
@@ -889,11 +1040,12 @@ if __name__ == "__main__":
                         )
                         param_group_analysis_data.append(prompt_analysis)
                     
-                    # Save parameter group analysis log (new functionality)
+                    # Save parameter group analysis log with zero-crossing analysis (new functionality)
                     _save_parameter_group_log(
                         param_group_data=param_group_analysis_data,
                         dec_params=current_params_dict,
-                        output_dir=param_group_output_dir
+                        output_dir=param_group_output_dir,
+                        step_data_dict=prompts_data_dict
                     )
                 
                 logger.info("All annotated plotting complete.")
