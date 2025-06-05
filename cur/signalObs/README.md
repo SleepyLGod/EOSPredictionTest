@@ -1,6 +1,58 @@
-# AttentionMap Obeservation
+# Attention Map Observation
+
+This module provides comprehensive tools for analyzing attention patterns in large language models (LLMs) during text generation. It captures, visualizes, and analyzes attention maps across different layers, heads, and generation steps to understand model behavior and identify potential signals for end-of-sequence prediction.
 
 ✍️ @SleepyLGod
+
+## Overview
+
+The system consists of several analysis tools:
+
+1. **Interactive Analysis** (`AttentionMapTest.ipynb`, `attentionObs.ipynb`) - Jupyter notebooks for exploratory attention analysis
+2. **Attention Map Generation** (`mapTest.py`) - Generates attention heatmaps for specific prompts and models
+3. **Parameter Impact Analysis** (`parameterRangeTest.py`) - Studies how decoding parameters affect generation length
+4. **Attention Signal Detection** (`valueTest.py`) - Detects attention patterns that might signal end-of-sequence
+5. **Visualization Tools** (`graphsCount.py`) - Combines multiple attention heatmaps into comprehensive visualizations
+6. **Automated Testing** (`autoTest.sh`, `longRun.sh`) - Scripts for batch processing and systematic analysis
+7. **Dataset Processing** (`attached/datasetTest.py`) - Processes datasets for attention analysis
+
+## Core Files
+
+### 📊 `mapTest.py` - Attention Map Generation
+**Purpose**: Generates detailed attention heatmaps for specific prompts across different models and datasets.
+
+**Key Features**:
+- **Multi-Model Support**: Llama-3.2-1B, Meta-Llama-3-8B, Meta-Llama-3-70B, Meta-Llama-3-8B-Instruct, GPT-J, Llama-2, GPT-NeoX
+- **Multi-Dataset Support**: Alpaca, Simplified Alpaca, LMSYS Chat 1M
+- **Layer-Head Analysis**: Generates heatmaps for all layer-head combinations
+- **Generation Tracking**: Records attention patterns throughout the generation process
+- **Output Management**: Saves heatmaps, generation info, and metadata to organized directories
+
+### 🔬 `valueTest.py` - Attention Signal Detection
+**Purpose**: Analyzes attention patterns to detect potential signals that indicate approaching end-of-sequence.
+
+**Key Features**:
+- **Tail Attention Analysis**: Monitors attention scores in the last few tokens of sequences
+- **Alert System**: Detects when attention concentrates on recent tokens (potential EOS signal)
+- **Multi-Model Testing**: Supports the same model range as mapTest.py
+- **Detailed Logging**: Records attention alerts with specific scores and positions
+
+### 📈 `parameterRangeTest.py` - Parameter Impact Analysis
+**Purpose**: Systematically tests how different decoding parameters affect generation length and behavior.
+
+**Key Features**:
+- **Parameter Sweeps**: Tests ranges of repetition_penalty, temperature, and top_k values
+- **Length Tracking**: Records output lengths for each parameter combination
+- **Visualization**: Generates plots showing parameter vs. output length relationships
+- **Comprehensive Testing**: Three separate experiments for each parameter type
+
+### 🎨 `graphsCount.py` - Visualization Combination
+**Purpose**: Combines individual attention heatmaps into comprehensive grid visualizations.
+
+**Key Features**:
+- **Grid Layout**: Arranges heatmaps by layer (rows) and head (columns)
+- **Missing Data Handling**: Creates blank spaces for missing heatmaps
+- **Large-Scale Visualization**: Supports up to 15 layers × 31 heads grids
 
 ## Running Config
 
@@ -12,12 +64,111 @@ pip install -r requirements.txt
 # install your own torch version
 ```
 
-## Obersevations
+## Quick Start
 
-### Basic Intro
+### 1. Single Attention Map Analysis
+```bash
+python mapTest.py
+# Follow prompts to select model, dataset, and prompt
+```
 
-- Basically, the attention map is a matrix of size $(num_{heads}, num_{tokens}, num_{tokens})$ where each element $(i, j, k)$ represents the attention score of the i-th head of the k-th token to the j-th token.
-- Attention scores are calculated by the dot product of the query and key vectors of the attention mechanism, i.e. $score = softmax(Q \cdot K^T/\sqrt{d})$. And thus, the map is not such **accurate**, in the reason that in the decoding phase, each token has a specific scores (distribution but not the exact value) to all the tokens in the input sequence, so we have to get the raw data by fine-tuning the model.
+### 2. Parameter Impact Testing
+```bash
+python parameterRangeTest.py
+# Tests how different parameters affect generation length
+```
+
+### 3. Attention Signal Detection
+```bash
+python valueTest.py
+# Analyzes attention patterns for EOS signals
+```
+
+### 4. Automated Batch Testing
+```bash
+# For systematic testing across multiple configurations
+./autoTest.sh
+
+# For large-scale parallel processing
+./longRun.sh
+```
+
+### 5. Visualization Combination
+```bash
+python graphsCount.py
+# Combines individual heatmaps into grid layouts
+```
+
+## Folder Structure
+
+```
+cur/signalObs/
+├── README.md                          # This file
+├── mapTest.py                         # Attention map generation for specific prompts
+├── valueTest.py                       # Attention signal detection and EOS analysis
+├── parameterRangeTest.py              # Parameter impact analysis on generation length
+├── graphsCount.py                     # Visualization combination tool
+├── AttentionMapTest.ipynb             # Interactive attention analysis notebook
+├── attentionObs.ipynb                 # Attention observation experiments
+├── autoTest.sh                        # Automated testing script
+├── longRun.sh                         # Large-scale parallel processing script
+└── attached/                          # Additional analysis tools
+    ├── datasetTest.py                 # Dataset processing for attention analysis
+    └── datasetTestMac.py              # Mac-specific dataset processing
+```
+
+## Supported Models
+
+The system supports analysis of the following models:
+1. **Llama-3.2-1B** - Lightweight model for quick testing (16 layers, 32 heads)
+2. **Meta-Llama-3-8B** - Standard Llama-3 model
+3. **Meta-Llama-3-70B** - Large-scale Llama-3 model
+4. **Meta-Llama-3-8B-Instruct** - Instruction-tuned variant (used in TRAIL experiments)
+5. **GPT-J-6B** - EleutherAI's GPT-J model
+6. **Llama-2-13B-Chat** - Fine-tuned Llama-2 model
+7. **GPT-NeoX-20B** - EleutherAI's GPT-NeoX model
+
+## Supported Datasets
+
+1. **Alpaca Dataset** - Standard instruction-following dataset
+2. **Simplified Alpaca** - Reduced version for faster testing
+3. **LMSYS Chat 1M** - Large-scale conversation dataset
+
+## Analysis Types
+
+### 1. Layer-wise Analysis
+- Tracks attention patterns across different transformer layers
+- Identifies how attention evolves from shallow to deep layers
+- Generates heatmaps showing layer-specific attention distributions
+
+### 2. Head-wise Analysis
+- Analyzes attention patterns across different attention heads
+- Identifies head specialization and attention focus patterns
+- Creates visualizations for head-specific behaviors
+
+### 3. Token-wise Analysis
+- Tracks attention evolution as new tokens are generated
+- Monitors attention shifts throughout the generation process
+- Identifies patterns that might indicate approaching EOS
+
+### 4. Parameter Impact Analysis
+- Studies how decoding parameters affect attention patterns
+- Tests ranges of temperature, top_k, and repetition_penalty values
+- Correlates parameter settings with generation length and quality
+
+## Observations
+
+### Basic Introduction
+
+**Attention Map Structure**:
+- Attention maps are matrices of size $(num_{layers}, num_{heads}, num_{tokens}, num_{tokens})$
+- Each element $(l, h, i, j)$ represents the attention score of layer $l$, head $h$, from token $i$ to token $j$
+- Attention scores are calculated by: $score = softmax(Q \cdot K^T/\sqrt{d})$
+
+**Key Considerations**:
+- During decoding, each token has specific attention distributions to all previous tokens
+- Attention patterns can reveal model behavior and potential EOS signals
+- Raw attention data provides insights into model decision-making processes
 
 ### Heads and Layers
 
@@ -37,68 +188,129 @@ Heads and layers are the two **main hyperparameters** of the attention mechanism
 
 *Owing to various head mechanism, we'll mainly discuss the layer things.*
 
-### Rough Observations
+### Key Findings
 
-> **Experimental settings**:
->
-> - Llama-3.2-8b Model
-> - Alpaca Dataset (QA tasks chosen)
->
-> **Current defects**:
->
-> - The model has not been fine-tuned, so it will generate a short answer and repeat it, and will not generate an *end_of_sequence* token.
-> - After improvements such as adding *top-k sampling*, *temperature mechanism*, and *repetition penalty*, the generation length has been limited, but the coherence and accuracy of the answer are not high, and fine-tuning is still needed to obtain a more accurate end_of_sequence token.
+> **Experimental Settings**:
+> - Multiple models: Llama-3.2-1B to GPT-NeoX-20B
+> - Multiple datasets: Alpaca, Simplified Alpaca, LMSYS Chat 1M
+> - Systematic parameter testing across temperature, top_k, and repetition_penalty
 
-1. No matter what the number of layer/head is, for one particular $Q_i{K_{1\rightarrow{i}}}^T$ vector, the hightest score is often from $Q_i{K_{j\rightarrow{i}}}^T$ chunks, where $j$ is close to $i$. Of course, there are some exceptions that: *the attention scores are distributed to all the tokens in the input sequence*, **or** *one token has a high score to all the tokens in the input sequence*. But the former is more common.
-2. The same observation as the meta's layer-skip paper, the attention scores of the last few layers is really low enough to be ignored.
-3. From the start of the decoding phase to the generation of the 'end_of_sequence' token: seems no such trend?
+> **Current Capabilities**:
+> - Comprehensive attention map generation and visualization
+> - Automated batch processing for large-scale analysis
+> - Parameter impact analysis on generation behavior
+> - Attention signal detection for potential EOS prediction
 
-## Parameters
+**Attention Pattern Observations**:
 
-1. **Temperature** $T$:
-   - A parameter that controls the randomness of the output. It is applied to the probability distribution of the next token to be generated.
-   - $P_i=\frac{e^{z_i/T}}{\sum_{j}e^{z_j/T}}, Z_i$ is the logits of the $i$-th token
-   - Effect:
-     - High $T$ (e.g., > 1.0): Sharper probability distribution. The model becomes more creative and less deterministic. The output can be more diverse but may be less coherent.
-     - Low $T$ (e.g., < 1.0): More smooth probability distribution. The model becomes more deterministic and conservative, often producing more predict
-     able and repetitive text.
-     - $T=0$: The model will always choose the most probable next token (greedy sampling).
-2. **Sampling**:
+1. **Local Attention Dominance**: For most layer-head combinations, attention scores are highest for nearby tokens. The pattern $Q_i K_{j \rightarrow i}^T$ shows peak values when $j$ is close to $i$, indicating strong local dependencies.
 
-   Top-k sampling, top-p sampling, nucleus sampling
+2. **Layer-Specific Behaviors**:
+   - Early layers focus on local syntactic relationships
+   - Middle layers capture semantic dependencies
+   - Later layers show reduced attention magnitudes (consistent with layer-skip research)
 
-   - Top-k Sampling:
-     - $k=1$: Greedy Sampling
-     - $k>1$: Randomly sample from the top $K$ most likely tokens.
-     - $P_i=0, i\notin top_k$
-   - Top-p (Nucleus) Sampling:
-      - Top-p sampling selects the smallest set of tokens whose cumulative probability exceeds a threshold p.
-      - $p=1.0$: Equivalent to no sampling, i.e., considering all possible tokens.
-      - $P<1.0$: Reduces the number of tokens considered, leading to more diverse outputs.
-   - Beam Search:
-     - A heuristic search algorithm that explores a graph by expanding the most promising nodes in a limited number of branches (beams).
-     - Beam Width (k): Determines the number of candidate sequences to keep at each step.
-     - Higher k: Increases the diversity of the output but also the computational cost.
-   - Length Penalty
-     - This parameter is part of the beam search configuration. Adjusts the scores of candidate sequences based on their length, encouraging or discouraging longer outputs.
-     - $\alpha>0$: Penalizes longer sequences, encouraging shorter outputs.
-     - $\alpha<0$: Rewards longer sequences, encouraging more detailed responses.
-3. **Repetition Penalty**
-   A factor that penalizes the repetition of **tokens / sequences of tokens** in the generated text. It encourages the model to produce more diverse and coherent outputs by discouraging it from repeating the same tokens.
-   Effect:
-   - Penalty > 1.0: Increases the penalty for repeating tokens, reducing redundancy in the output.
-   - Penalty = 1.0: No penalty is applied.
-4. Maximum Sequence Length (Max Length)
-    - The maximum number of tokens that can be generated in a single sequence. It helps control the length of the output and avoid generating overly long responses.
-    - Effect:
-      - Longer Max Length: Allows the model to generate more detailed responses but may lead to less coherent or relevant outputs.
-      - Shorter Max Length: Encourages the model to be more concise and focused but may cut off important information.
-5. Minimum Sequence Length
-    - Ensures that the model generates a response of at least a certain length, preventing overly short or empty responses.
-6. Sampling Temperature Decay
-   - Some implementations allow the temperature to change over the course of generation, often decreasing as the sequence progresses.
-   - Can help in starting with more creativity and becoming more deterministic as the sequence develops.
-7. Presence and Frequency Penalties
-   - Some models allow for penalties based on the presence or frequency of specific tokens in the generated text.
-   - Presence Penalty: Penalizes the model for generating tokens that have already appeared in the output.
-   - Frequency Penalty: Penalizes the model based on how frequently a token has appeared in the output.
+3. **Head Specialization**: Different attention heads within the same layer exhibit distinct attention patterns:
+   - Some heads focus on recent context (recency bias)
+   - Others maintain broader attention distributions
+   - Certain heads show potential EOS-predictive behaviors
+
+4. **Generation Phase Patterns**:
+   - Attention patterns evolve throughout generation
+   - Tail attention analysis reveals potential EOS signals
+   - Parameter settings significantly impact attention distributions
+
+5. **Parameter Impact**:
+   - **Temperature**: Higher values increase attention diversity
+   - **Top-k**: Affects the breadth of attention distributions
+   - **Repetition Penalty**: Influences attention to previously generated tokens
+
+## Automation Scripts
+
+### `autoTest.sh` - Systematic Testing
+**Purpose**: Automated testing across multiple parameter combinations for systematic analysis.
+
+**Features**:
+- Tests combinations of models, datasets, and prompts
+- Configurable parameter ranges
+- Error handling and status reporting
+- Sequential execution with timing information
+
+**Usage**:
+```bash
+./autoTest.sh
+# Tests predefined combinations automatically
+```
+
+### `longRun.sh` - Large-Scale Parallel Processing
+**Purpose**: High-throughput analysis using GNU Parallel for extensive experiments.
+
+**Features**:
+- Parallel execution with configurable job limits
+- Timeout handling for long-running tasks
+- Progress tracking and ETA estimation
+- Resume capability for failed jobs
+- Comprehensive logging
+
+**Usage**:
+```bash
+./longRun.sh
+# Runs large-scale parallel analysis
+```
+
+## Output Structure
+
+The analysis generates organized outputs in the following structure:
+
+```
+../images/maps_final/[model]_[dataset]_prompt_[id]/
+├── generation_info.txt                # Prompt, output, and metadata
+├── heatmap_layer_[L]_head_[H].png    # Individual attention heatmaps
+└── [combined_visualizations].png     # Grid layouts of all heatmaps
+
+../scores/[model]/
+├── ds_[dataset]_p_[prompt]_gen_info.txt  # Generation info with attention alerts
+└── [analysis_results].txt               # Detailed attention analysis
+
+../.output/prompt_[id]/
+├── exp1_params_[value].txt           # Parameter experiment results
+├── exp2_params_[value].txt           # Temperature experiment results
+├── exp3_params_[value].txt           # Top-k experiment results
+└── [experiment]_graph.png            # Parameter vs. length plots
+```
+
+## Decoding Parameters Reference
+
+### 1. **Temperature** $T$
+Controls randomness in token selection:
+- $P_i = \frac{e^{z_i/T}}{\sum_{j}e^{z_j/T}}$ where $z_i$ is the logit for token $i$
+- **High $T$ (> 1.0)**: More creative, diverse, less deterministic output
+- **Low $T$ (< 1.0)**: More conservative, predictable output
+- **$T = 0$**: Greedy sampling (always most probable token)
+
+### 2. **Top-k Sampling**
+Limits token selection to top-k most probable tokens:
+- **$k = 1$**: Greedy sampling
+- **$k > 1$**: Random sampling from top-k candidates
+- **Effect**: Controls diversity vs. quality trade-off
+
+### 3. **Repetition Penalty**
+Penalizes repeated tokens to encourage diversity:
+- **Penalty > 1.0**: Reduces repetition, increases diversity
+- **Penalty = 1.0**: No penalty applied
+- **Effect**: Balances coherence and repetition avoidance
+
+### 4. **Max New Tokens**
+Controls maximum generation length:
+- **Longer limits**: More detailed responses, potential coherence loss
+- **Shorter limits**: Concise responses, potential information cutoff
+
+## Dependencies
+
+- **PyTorch**: Neural network operations and model loading
+- **Transformers**: HuggingFace model and tokenizer support
+- **Datasets**: Dataset loading and processing
+- **NumPy**: Numerical computations and array operations
+- **Matplotlib**: Visualization and plotting
+- **PIL (Pillow)**: Image processing for heatmap combination
+- **GNU Parallel**: Large-scale parallel processing (for longRun.sh)

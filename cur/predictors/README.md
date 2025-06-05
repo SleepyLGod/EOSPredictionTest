@@ -4,10 +4,13 @@ This module implements an end-of-sequence (EOS) prediction system for large lang
 
 ## Overview
 
-The system consists of three main components:
+The system consists of six main components:
 1. **Model Training** (`ebdModelGenFinal.py`) - Trains the length prediction neural network
 2. **Model Evaluation** (`resultTest.py`) - Evaluates trained models on various datasets
 3. **Results Analysis** (`graphsModified.py`) - Generates comprehensive visualizations and statistics
+4. **Error Profile Analysis** (`errorProfileGen.py`) - Analyzes step-0 prediction errors and generates error profiles
+5. **Error Evolution Analysis** (`errorRatioEvol.py`) - Tracks error ratio evolution throughout generation sequences
+6. **Parameter Optimization** (`sysParaRank.py`) - Ranks and optimizes decoding parameter combinations
 
 ## Core Files
 
@@ -73,6 +76,55 @@ EPOCHS = 50
 - Per-prompt evolution tracking
 - Aggregated metadata JSON with all statistics
 
+### 📈 `errorProfileGen.py` - Error Profile Analysis
+**Purpose**: Analyzes initial prediction errors (step-0) and generates comprehensive error profiles for different parameter combinations.
+
+**Key Features**:
+- **Step-0 Error Analysis**: Focuses on the critical first prediction made after prompt prefilling
+- **Error Ratio Calculations**: Computes prediction ratios and error percentages
+- **Parameter Group Profiling**: Generates separate error profiles for each decoding parameter combination
+- **Statistical Analysis**: Comprehensive statistics including mean, median, std dev, and percentiles
+- **Distribution Plotting**: Creates error ratio distribution plots with multiple ranges and density visualization
+
+**Analysis Types**:
+- Prefill-based error profiles (step_index=0 predictions)
+- Combined error profiles across all parameters
+- Error ratio distributions (overall and per-parameter group)
+- Focused and wide-range distribution plots
+
+### 🔄 `errorRatioEvol.py` - Error Evolution Analysis
+**Purpose**: Tracks and visualizes how prediction errors evolve throughout the generation sequence for individual prompts.
+
+**Key Features**:
+- **Error Ratio Evolution**: Plots error ratio changes across decoding steps
+- **Prediction Length Tracking**: Shows predicted remaining length annotations
+- **Curve Fitting**: Applies linear and quadratic trend fitting with tail data exclusion
+- **Volatility Analysis**: Calculates error volatility metrics for different sequence segments
+- **Enhanced Visualizations**: Three-panel layouts with error ratios, prediction lengths, and tail data tables
+
+**Analysis Capabilities**:
+- Single-prompt error evolution plots
+- Error tokens vs. decoding step analysis
+- Tail behavior analysis (last 5-20% of tokens)
+- Statistical curve fitting and trend analysis
+- Volatility metrics for different sequence segments
+
+### 🏆 `sysParaRank.py` - Parameter Optimization
+**Purpose**: Ranks decoding parameter combinations based on composite performance scores to identify optimal configurations.
+
+**Key Features**:
+- **Composite Scoring**: Combines multiple metrics (MAE, RMSE, bias, error ratios) into unified scores
+- **Parameter Ranking**: Ranks parameter groups from best to worst performing
+- **Statistical Aggregation**: Processes raw evaluation logs to extract key performance metrics
+- **Top-N Selection**: Identifies and reports the best-performing parameter combinations
+
+**Ranking Metrics**:
+- Mean Absolute Error (MAE) and Root Mean Square Error (RMSE)
+- Absolute bias and standard deviation of errors
+- Mean and standard deviation of error ratios
+- Prediction ratio deviations from ideal (1.0)
+- Composite scores based on rank aggregation
+
 ## Folder Structure
 
 ```
@@ -81,6 +133,9 @@ cur/predictors/
 ├── ebdModelGenFinal.py                # Neural network training script
 ├── resultTest.py                      # Model evaluation framework
 ├── graphsModified.py                  # Results analysis and visualization
+├── errorProfileGen.py                 # Error profile analysis and step-0 error analysis
+├── errorRatioEvol.py                  # Error ratio evolution analysis and plotting
+├── sysParaRank.py                     # System parameter ranking and optimization
 ├── idChecking.py                      # Utility for ID validation
 ├── used_prompt_ids.txt                # Training data prompt IDs (for exclusion)
 │
@@ -93,7 +148,7 @@ cur/predictors/
 │   ├── 20250509_003641/             # Training run logs
 │   └── train_*.log                  # Historical training logs
 │
-├── results/                         # Analysis results
+├── results/                         # Analysis results from graphsModified.py
 │   ├── clean/                       # Clean dataset results
 │   ├── databricks/                  # Databricks dataset results
 │   └── eval/                        # Evaluation dataset results
@@ -101,9 +156,19 @@ cur/predictors/
 │       ├── per_param_group/         # Parameter-specific analysis
 │       └── per_prompt_evolution/    # Individual prompt tracking
 │
-├── eval_output/                     # Evaluation output directory
+├── eval_output/                     # Advanced analysis outputs
+│   ├── clean/                       # Clean dataset analysis
+│   │   ├── group_step0_error_ratio_plots/  # Per-parameter error distributions
+│   │   ├── per_param_group/         # Parameter group analysis
+│   │   └── sum/                     # Summary plots
+│   ├── databricks_evol/             # Databricks evolution analysis
+│   ├── eval_evol/                   # Evaluation evolution analysis
+│   ├── prefill_err_profiles_*.jsonl # Error profile data files
+│   └── rank_param_*.txt             # Parameter ranking results
+│
 ├── length_predictor_eval_results_*.jsonl  # Detailed evaluation results
-└── Phase*.ipynb                     # Development notebooks
+├── pro_length_predictor_eval_results_*.jsonl  # Professional evaluation results
+└── __pycache__/                     # Python cache files
 ```
 
 ## Quick Start
@@ -120,11 +185,34 @@ python ebdModelGenFinal.py
 python resultTest.py
 ```
 
-### 3. Analyzing Results
+### 3. Basic Results Analysis
 ```bash
 # Update RESULTS_JSONL_FILE in graphsModified.py to point to your evaluation results
 python graphsModified.py
 ```
+
+### 4. Advanced Error Analysis
+```bash
+# Generate error profiles and step-0 analysis
+python errorProfileGen.py
+
+# Analyze error evolution for individual prompts
+python errorRatioEvol.py
+
+# Rank parameter combinations by performance
+python sysParaRank.py
+```
+
+## Complete Analysis Workflow
+
+For a comprehensive analysis of your length predictor, follow this workflow:
+
+1. **Train the model** using `ebdModelGenFinal.py`
+2. **Evaluate the model** using `resultTest.py` to generate detailed JSONL results
+3. **Generate basic visualizations** using `graphsModified.py`
+4. **Analyze error profiles** using `errorProfileGen.py` for step-0 error distributions
+5. **Track error evolution** using `errorRatioEvol.py` for individual prompt analysis
+6. **Optimize parameters** using `sysParaRank.py` to identify best-performing configurations
 
 ## Dependencies
 
@@ -139,16 +227,50 @@ python graphsModified.py
 ## Key Metrics
 
 The system tracks several important metrics:
+
+### Primary Performance Metrics
 - **MAE (Mean Absolute Error)**: Average prediction error in tokens
 - **RMSE (Root Mean Square Error)**: Penalizes larger errors more heavily
 - **R² Score**: Correlation between predicted and actual lengths
 - **Bias**: Systematic over/under-prediction tendency
-- **Tail Error Ratio**: Special metric for near-completion sequences
 - **Latency**: Prediction inference time
+
+### Advanced Error Analysis Metrics
+- **Error Ratio**: `(actual_rest_len - predicted_rest_len) / actual_rest_len`
+- **Prediction Ratio**: `(prompt_len + predicted_rest) / (prompt_len + actual_generated)`
+- **Step-0 Error**: Initial prediction error immediately after prompt prefilling
+- **Error Evolution**: How prediction errors change throughout generation
+- **Volatility Metrics**: Error stability across different sequence segments
+
+### Parameter Optimization Metrics
+- **Composite Score**: Weighted combination of multiple performance metrics
+- **Parameter Ranking**: Relative performance of different decoding configurations
+- **Error Profile Statistics**: Mean, median, standard deviation, and percentiles of errors
+
+## Output Files
+
+The system generates various types of output files:
+
+### Evaluation Results
+- `length_predictor_eval_results_*.jsonl`: Detailed step-by-step evaluation results
+- `pro_length_predictor_eval_results_*.jsonl`: Professional evaluation results
+
+### Error Analysis
+- `prefill_err_profiles_*.jsonl`: Error profile data for different datasets
+- `rank_param_*.txt`: Parameter ranking results with performance scores
+
+### Visualizations
+- Error ratio distribution plots (overall and per-parameter group)
+- Error evolution plots for individual prompts
+- Parameter performance comparison charts
+- Statistical analysis summaries
 
 ## Notes
 
 - Training requires pre-computed LLM embeddings and features (see `../training_data/`)
 - Evaluation uses real LLM generation, requiring significant GPU memory
-- Results analysis generates extensive visualizations for thorough performance assessment
+- The advanced analysis pipeline generates extensive visualizations and statistical reports
+- Error profile analysis focuses on step-0 predictions which are critical for early stopping decisions
+- Parameter optimization helps identify the best decoding configurations for your specific use case
 - The system is designed for Meta-Llama-3-70B but can be adapted for other models
+- All analysis scripts can be configured by modifying the file paths at the top of each script

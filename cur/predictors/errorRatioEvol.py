@@ -1,3 +1,11 @@
+# 1. Loading and preparing data from JSONL files
+# 2. Plotting error ratio evolution with predicted length annotations
+# 3. Extracting and logging analysis data for each prompt
+# 4. Saving analysis logs for each parameter group
+# 5. Plotting error tokens evolution with predicted length annotations
+# 6. Extracting and logging analysis data for error tokens curves
+# 7. Plotting error tokens evolution with predicted length annotations
+
 import json
 from pathlib import Path
 import pandas as pd
@@ -1025,19 +1033,19 @@ def _extract_error_tokens_curve_data(df_steps: pd.DataFrame, y_column: str) -> d
         'best_fit_type': None,
         'best_fit_r2': None
     }
-
+    
     if len(df_steps) < 3:
         return result
-
+    
     x_data = df_steps['step_index'].values
     y_data = df_steps[y_column].values
-
+    
     try:
         # Linear fit
         linear_coeffs = np.polyfit(x_data, y_data, 1)
         linear_poly = np.poly1d(linear_coeffs)
         linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
-
+        
         result['can_fit'] = True
         result['linear_slope'] = linear_coeffs[0]
         result['linear_intercept'] = linear_coeffs[1]
@@ -1045,27 +1053,27 @@ def _extract_error_tokens_curve_data(df_steps: pd.DataFrame, y_column: str) -> d
         result['linear_formula'] = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
         result['best_fit_type'] = 'linear'
         result['best_fit_r2'] = linear_r2
-
+        
         # Quadratic fit (if enough points)
         if len(df_steps) >= 5:
             quad_coeffs = np.polyfit(x_data, y_data, 2)
             quad_poly = np.poly1d(quad_coeffs)
             quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
-
+            
             result['quadratic_a'] = quad_coeffs[0]
             result['quadratic_b'] = quad_coeffs[1]
             result['quadratic_c'] = quad_coeffs[2]
             result['quadratic_r2'] = quad_r2
             result['quadratic_formula'] = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
-
+            
             # Choose best fit based on R²
             if quad_r2 > linear_r2:
                 result['best_fit_type'] = 'quadratic'
                 result['best_fit_r2'] = quad_r2
-
+    
     except (np.linalg.LinAlgError, np.RankWarning):
         result['can_fit'] = False
-
+    
     return result
 
 
@@ -1073,17 +1081,17 @@ def _set_optimal_y_limits(ax, y_data: pd.Series, padding_factor: float = 0.1):
     """Set optimal Y-axis limits to ensure all data points are visible."""
     if y_data.empty:
         return
-
+    
     y_min = y_data.min()
     y_max = y_data.max()
     y_range = y_max - y_min
-
+    
     # Add padding
     if y_range > 0:
         padding = y_range * padding_factor
     else:
         padding = max(abs(y_min), abs(y_max)) * 0.1 if y_min != 0 or y_max != 0 else 1
-
+    
     ax.set_ylim(y_min - padding, y_max + padding)
 
 
@@ -1222,6 +1230,257 @@ def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
     save_plot_to_file(fig, full_plot_path)
 
 
+def plot_error_tokens_single_for_prompt(
+    prompt_id: str,
+    step_data_list: list,
+    dec_params: dict,
+    output_dir: Path
+):
+    """Plot error tokens evolution for a single prompt with predicted length annotations.
+    
+    Creates a single plot showing error tokens vs decoding step with annotations
+    on the last max(30% of steps, 20) points showing predicted remaining length.
+    """
+    if not step_data_list:
+        logger.warning(f"No step data for prompt {prompt_id} with params {dec_params}. Skipping single error tokens plot.")
+        return
+    
+    # Prepare data
+    df_error_tokens = _prepare_error_tokens_data(step_data_list)
+    
+    if df_error_tokens.empty:
+        logger.info(f"No valid error tokens data to plot for prompt {prompt_id}, params {dec_params}")
+        return
+    
+    # Create figure with extra wide aspect ratio to prevent annotation overlap
+    fig, ax = plt.subplots(1, 1, figsize=(20, 8))
+    
+    # Plot error tokens
+    sns.lineplot(data=df_error_tokens, x='step_index', y='error_tokens',
+                marker='o', markersize=4, ax=ax, color='darkblue',
+                label="Error Tokens", zorder=2)
+    
+    # Add zero line for reference
+    ax.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Zero Line', zorder=1)
+    
+    # Calculate annotation points: last max(30% of steps, 20) points
+    total_steps = len(df_error_tokens)
+    min_annotation_points = min(20, total_steps)  # If total steps < 20, use all steps
+    annotation_points_count = max(int(total_steps * 0.3), min_annotation_points)
+    
+    # Get the last N points for annotation
+    annotation_df = df_error_tokens.tail(annotation_points_count)
+    
+    # Calculate Y-axis range for smart annotation positioning
+    y_min = df_error_tokens['error_tokens'].min()
+    y_max = df_error_tokens['error_tokens'].max()
+    y_range = y_max - y_min if y_max != y_min else max(abs(y_min), abs(y_max), 1)
+    
+    # Add predicted remaining length annotations with smart positioning
+    for i, (_, row) in enumerate(annotation_df.iterrows()):
+        predicted_len = row['predicted_rest_len']
+        step_idx = row['step_index']
+        error_val = row['error_tokens']
+        
+        # Alternate annotation positions: above and below, with longer arrows
+        if i % 2 == 0:  # Even index: annotate above
+            y_offset = y_range * 0.18  # 18% of y-range above
+            va = 'bottom'
+            arrow_color = 'darkgreen'
+            box_color = 'lightgreen'
+        else:  # Odd index: annotate below
+            y_offset = -y_range * 0.18  # 18% of y-range below
+            va = 'top'
+            arrow_color = 'darkblue'
+            box_color = 'lightblue'
+        
+        # For very dense annotations, add horizontal offset to create staggered layout
+        if annotation_points_count > 15:
+            x_offset = (i % 3 - 1) * 0.4  # Horizontal jitter: -0.4, 0, 0.4
+        elif annotation_points_count > 10:
+            x_offset = (i % 2 - 0.5) * 0.3  # Smaller jitter: -0.15, 0.15
+        else:
+            x_offset = 0
+        
+        ax.annotate(f'{predicted_len:.0f}',
+                    xy=(step_idx, error_val),
+                    xytext=(step_idx + x_offset, error_val + y_offset),
+                    ha='center', va=va,
+                    fontsize=7, color=arrow_color, weight='bold',
+                    bbox=dict(boxstyle='round,pad=0.15', facecolor=box_color, alpha=0.85,
+                            edgecolor=arrow_color, linewidth=0.8),
+                    arrowprops=dict(arrowstyle='->', color=arrow_color, lw=0.8,
+                                    connectionstyle="arc3,rad=0.15" if x_offset != 0 else "arc3,rad=0"),
+                    zorder=4)
+    
+    # Set labels and title
+    param_str_title = ", ".join([f"{k.replace('temperature','T').replace('repetition_penalty','RP')}={v}"
+                                for k,v in sorted(dec_params.items())])
+    ax.set_title(f"Error Tokens Evolution for Prompt: {prompt_id}\nParams: {param_str_title}", fontsize=14)
+    ax.set_xlabel("Decoding Step Index", fontsize=12)
+    ax.set_ylabel("Error Tokens (Actual - Predicted)", fontsize=12)
+    
+    # Set optimal Y limits to ensure all data points and annotations are visible
+    # Use the same y_range calculation as above for consistency
+    if y_range > 0:
+        padding = y_range * 0.25  # 25% padding for annotations (more than before)
+    else:
+        padding = max(abs(y_min), abs(y_max)) * 0.25 if y_min != 0 or y_max != 0 else 2
+    
+    ax.set_ylim(y_min - padding, y_max + padding)  # Equal space above and below for annotations
+    
+    # Add legend and grid
+    ax.legend(loc='upper right')
+    ax.grid(True, linestyle=':', alpha=0.7)
+    
+    # Add annotation info text
+    info_text = f"Annotations on last {annotation_points_count} steps\n({annotation_points_count/total_steps:.0%} of total steps)"
+    ax.text(0.02, 0.98, info_text,
+            transform=ax.transAxes, fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8))
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save plot
+    prompt_filename_safe = sanitize_filename(prompt_id)
+    plot_filename = f"prompt_{prompt_filename_safe}_error_tokens_single.png"
+    full_plot_path = output_dir / plot_filename
+    save_plot_to_file(fig, full_plot_path)
+
+
+def _calculate_volatility_metrics(values: list) -> dict:
+    """Calculate various volatility metrics for a sequence of values.
+    Returns:
+        dict: Contains std, cv, mad, and other volatility measures
+    """
+    if not values or len(values) < 2:
+        return {
+            'count': len(values) if values else 0,
+            'mean': values[0] if values else 0,
+            'std': 0,
+            'cv': 0,
+            'mad': 0,
+            'range': 0,
+            'min': values[0] if values else 0,
+            'max': values[0] if values else 0
+        }
+
+    values_array = np.array(values)
+    mean_val = np.mean(values_array)
+    std_val = np.std(values_array, ddof=1) if len(values) > 1 else 0
+
+    # Coefficient of Variation (CV) - only meaningful if mean != 0
+    cv_val = abs(std_val / mean_val) if abs(mean_val) > 1e-9 else float('inf')
+
+    # Mean Absolute Deviation (MAD)
+    mad_val = np.mean(np.abs(values_array - mean_val))
+
+    # Range
+    range_val = np.max(values_array) - np.min(values_array)
+
+    return {
+        'count': len(values),
+        'mean': mean_val,
+        'std': std_val,
+        'cv': cv_val,
+        'mad': mad_val,
+        'range': range_val,
+        'min': np.min(values_array),
+        'max': np.max(values_array)
+    }
+
+
+def _analyze_error_tokens_volatility_for_prompt(prompt_id: str, step_data_list: list) -> dict:
+    """Analyze error tokens volatility for different tail segments of a prompt.
+    Returns:
+        dict: Volatility analysis for different segments
+    """
+    result = {
+        'prompt_id': prompt_id,
+        'total_steps': len(step_data_list),
+        'segments': {},
+        'comparisons': {}
+    }
+
+    if not step_data_list or len(step_data_list) < 5:
+        return result
+
+    # Prepare error tokens data
+    df_error_tokens = _prepare_error_tokens_data(step_data_list)
+    if df_error_tokens.empty:
+        return result
+
+    error_tokens = df_error_tokens['error_tokens'].tolist()
+    total_steps = len(error_tokens)
+
+    # Define segments to analyze
+    segments = {
+        'last_20_percent': max(1, int(total_steps * 0.2)),
+        'last_10_percent': max(1, int(total_steps * 0.1)),
+        'last_5_percent': max(1, int(total_steps * 0.05)),
+        'last_10_tokens': min(10, total_steps),
+        'last_5_tokens': min(5, total_steps)
+    }
+
+    # Calculate volatility for each segment
+    for segment_name, segment_size in segments.items():
+        segment_values = error_tokens[-segment_size:]
+        volatility = _calculate_volatility_metrics(segment_values)
+        volatility['segment_size'] = segment_size
+        volatility['percentage_of_total'] = segment_size / total_steps * 100
+        result['segments'][segment_name] = volatility
+
+    # Calculate baseline volatility (first 50% of steps for comparison)
+    baseline_size = max(5, int(total_steps * 0.5))
+    baseline_values = error_tokens[:baseline_size]
+    baseline_volatility = _calculate_volatility_metrics(baseline_values)
+    result['baseline'] = baseline_volatility
+    result['baseline']['segment_size'] = baseline_size
+    result['baseline']['percentage_of_total'] = baseline_size / total_steps * 100
+
+    # Compare each segment with baseline
+    for segment_name, segment_data in result['segments'].items():
+        comparison = {}
+
+        # Ratio comparisons (avoid division by zero)
+        if baseline_volatility['std'] > 1e-9:
+            comparison['std_ratio'] = segment_data['std'] / baseline_volatility['std']
+        else:
+            comparison['std_ratio'] = float('inf') if segment_data['std'] > 1e-9 else 1.0
+
+        if baseline_volatility['mad'] > 1e-9:
+            comparison['mad_ratio'] = segment_data['mad'] / baseline_volatility['mad']
+        else:
+            comparison['mad_ratio'] = float('inf') if segment_data['mad'] > 1e-9 else 1.0
+
+        if baseline_volatility['range'] > 1e-9:
+            comparison['range_ratio'] = segment_data['range'] / baseline_volatility['range']
+        else:
+            comparison['range_ratio'] = float('inf') if segment_data['range'] > 1e-9 else 1.0
+
+        # Absolute differences
+        comparison['std_diff'] = segment_data['std'] - baseline_volatility['std']
+        comparison['mad_diff'] = segment_data['mad'] - baseline_volatility['mad']
+        comparison['cv_diff'] = segment_data['cv'] - baseline_volatility['cv']
+
+        # Volatility classification
+        if comparison['std_ratio'] > 1.5:
+            comparison['volatility_level'] = 'Much Higher'
+        elif comparison['std_ratio'] > 1.2:
+            comparison['volatility_level'] = 'Higher'
+        elif comparison['std_ratio'] > 0.8:
+            comparison['volatility_level'] = 'Similar'
+        elif comparison['std_ratio'] > 0.5:
+            comparison['volatility_level'] = 'Lower'
+        else:
+            comparison['volatility_level'] = 'Much Lower'
+
+        result['comparisons'][segment_name] = comparison
+
+    return result
+
+
 def _analyze_error_tokens_curves_for_prompt(prompt_id: str, step_data_list: list) -> dict:
     """Analyze error tokens curve fitting for a single prompt.
     Returns:
@@ -1233,24 +1492,24 @@ def _analyze_error_tokens_curves_for_prompt(prompt_id: str, step_data_list: list
         'absolute_error_analysis': {},
         'real_error_analysis': {}
     }
-
+    
     if not step_data_list:
         return result
-
+    
     # Prepare data
     df_error_tokens = _prepare_error_tokens_data(step_data_list)
-
+    
     if df_error_tokens.empty:
         return result
-
+    
     # Analyze absolute error tokens
     abs_analysis = _extract_error_tokens_curve_data(df_error_tokens, 'absolute_error_tokens')
     result['absolute_error_analysis'] = abs_analysis
-
+    
     # Analyze real error tokens
     real_analysis = _extract_error_tokens_curve_data(df_error_tokens, 'error_tokens')
     result['real_error_analysis'] = real_analysis
-
+    
     return result
 
 
@@ -1264,28 +1523,28 @@ def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, ou
     if not param_group_data:
         logger.warning("No error tokens analysis data to save")
         return
-
+    
     # Create log filename
     log_filename = "error_tokens_curve_analysis_log.txt"
     log_path = output_dir / log_filename
-
+    
     try:
         # Calculate statistics
         total_prompts = len(param_group_data)
-
+        
         # Absolute error tokens statistics
         abs_can_fit = [p for p in param_group_data if p['absolute_error_analysis'].get('can_fit', False)]
         abs_fit_ratio = len(abs_can_fit) / total_prompts if total_prompts > 0 else 0
-
+        
         abs_declining_slopes = [p for p in abs_can_fit if p['absolute_error_analysis'].get('linear_slope', 0) < 0]
         abs_rising_slopes = [p for p in abs_can_fit if p['absolute_error_analysis'].get('linear_slope', 0) > 0]
-
+        
         # Real error tokens statistics
         real_can_fit = [p for p in param_group_data if p['real_error_analysis'].get('can_fit', False)]
         real_fit_ratio = len(real_can_fit) / total_prompts if total_prompts > 0 else 0
-
+        
         real_negative_slopes = [p for p in real_can_fit if p['real_error_analysis'].get('linear_slope', 0) < 0]
-
+        
         with open(log_path, 'w', encoding='utf-8') as f:
             # Write header
             param_str = ", ".join([f"{k}={v}" for k, v in sorted(dec_params.items())])
@@ -1295,20 +1554,20 @@ def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, ou
             f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Total Prompts: {total_prompts}\n")
             f.write(f"{'=' * 60}\n\n")
-
+            
             # Overall statistics
             f.write(f"OVERALL FITTING STATISTICS\n")
             f.write(f"{'-' * 40}\n")
             f.write(f"Prompts with fittable absolute error curves: {len(abs_can_fit)} ({abs_fit_ratio:.1%})\n")
             f.write(f"Prompts with fittable real error curves: {len(real_can_fit)} ({real_fit_ratio:.1%})\n\n")
-
+            
             # Absolute error tokens analysis
             f.write(f"ABSOLUTE ERROR TOKENS ANALYSIS\n")
             f.write(f"{'-' * 40}\n")
             f.write(f"Total fittable prompts: {len(abs_can_fit)}\n")
             f.write(f"Declining slopes (negative): {len(abs_declining_slopes)} ({len(abs_declining_slopes)/len(abs_can_fit)*100:.1f}% of fittable)\n")
             f.write(f"Rising slopes (positive): {len(abs_rising_slopes)} ({len(abs_rising_slopes)/len(abs_can_fit)*100:.1f}% of fittable)\n\n")
-
+            
             if abs_declining_slopes:
                 f.write(f"Declining Absolute Error Slopes:\n")
                 f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Decline Rate':<15}\n")
@@ -1319,7 +1578,7 @@ def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, ou
                     decline_rate = abs(slope)  # Magnitude of decline
                     f.write(f"{p['prompt_id']:<30} {slope:<12.4f} {r2:<8.3f} {decline_rate:<15.4f}\n")
                 f.write(f"\n")
-
+            
             if abs_rising_slopes:
                 f.write(f"Rising Absolute Error Slopes:\n")
                 f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Rise Rate':<15}\n")
@@ -1336,7 +1595,7 @@ def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, ou
             f.write(f"{'-' * 40}\n")
             f.write(f"Total fittable prompts: {len(real_can_fit)}\n")
             f.write(f"Negative slopes: {len(real_negative_slopes)} ({len(real_negative_slopes)/len(real_can_fit)*100:.1f}% of fittable)\n\n")
-
+            
             if real_negative_slopes:
                 f.write(f"Negative Real Error Slopes:\n")
                 f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Slope Value':<15}\n")
@@ -1346,11 +1605,131 @@ def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, ou
                     r2 = p['real_error_analysis']['linear_r2']
                     f.write(f"{p['prompt_id']:<30} {slope:<12.4f} {r2:<8.3f} {slope:<15.4f}\n")
                 f.write(f"\n")
-
+        
         logger.info(f"Error tokens curve analysis log saved: {log_path}")
-
+    
     except Exception as e:
         logger.error(f"Failed to save error tokens analysis log {log_path}: {e}")
+
+
+def _save_error_tokens_volatility_log(volatility_data: list, dec_params: dict, output_dir: Path):
+    """Save error tokens volatility analysis log for a parameter group.
+    Args:
+        volatility_data: List of volatility analysis data for all prompts
+        dec_params: Decoding parameters for this group
+        output_dir: Output directory for the volatility analysis
+    """
+    if not volatility_data:
+        logger.warning("No volatility analysis data to save")
+        return
+
+    # Create log filename
+    log_filename = "error_tokens_volatility_analysis_log.txt"
+    log_path = output_dir / log_filename
+
+    try:
+        with open(log_path, 'w', encoding='utf-8') as f:
+            # Write header
+            param_str = ", ".join([f"{k}={v}" for k, v in sorted(dec_params.items())])
+            f.write(f"Error Tokens Volatility Analysis Log\n")
+            f.write(f"{'=' * 70}\n")
+            f.write(f"Parameter Group: {param_str}\n")
+            f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Prompts: {len(volatility_data)}\n")
+            f.write(f"{'=' * 70}\n\n")
+
+            # Overall statistics
+            f.write(f"ANALYSIS METHODOLOGY\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"Volatility Metrics:\n")
+            f.write(f"  - Standard Deviation (STD): Measures spread of values\n")
+            f.write(f"  - Coefficient of Variation (CV): STD/Mean ratio\n")
+            f.write(f"  - Mean Absolute Deviation (MAD): Average absolute deviation from mean\n")
+            f.write(f"  - Range: Max - Min value\n\n")
+            f.write(f"Comparison Baseline: First 50% of decoding steps\n")
+            f.write(f"Volatility Levels: Much Lower (<0.5x), Lower (0.5-0.8x), Similar (0.8-1.2x),\n")
+            f.write(f"                   Higher (1.2-1.5x), Much Higher (>1.5x)\n\n")
+
+            # Summary statistics
+            valid_prompts = [p for p in volatility_data if p.get('total_steps', 0) >= 5]
+            f.write(f"SUMMARY STATISTICS\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"Valid prompts for analysis: {len(valid_prompts)} / {len(volatility_data)}\n\n")
+
+            if valid_prompts:
+                # Count volatility levels for each segment
+                segments = ['last_20_percent', 'last_10_percent', 'last_5_percent', 'last_10_tokens', 'last_5_tokens']
+
+                for segment in segments:
+                    f.write(f"{segment.replace('_', ' ').title()}:\n")
+
+                    volatility_counts = {}
+                    std_ratios = []
+
+                    for prompt in valid_prompts:
+                        if segment in prompt.get('comparisons', {}):
+                            level = prompt['comparisons'][segment].get('volatility_level', 'Unknown')
+                            volatility_counts[level] = volatility_counts.get(level, 0) + 1
+
+                            std_ratio = prompt['comparisons'][segment].get('std_ratio', 0)
+                            if std_ratio != float('inf') and std_ratio > 0:
+                                std_ratios.append(std_ratio)
+
+                    total_valid = sum(volatility_counts.values())
+                    for level in ['Much Lower', 'Lower', 'Similar', 'Higher', 'Much Higher']:
+                        count = volatility_counts.get(level, 0)
+                        percentage = count / total_valid * 100 if total_valid > 0 else 0
+                        f.write(f"  {level}: {count} ({percentage:.1f}%)\n")
+
+                    if std_ratios:
+                        avg_ratio = np.mean(std_ratios)
+                        f.write(f"  Average STD Ratio: {avg_ratio:.2f}\n")
+
+                    f.write(f"\n")
+
+            # Detailed prompt analysis
+            f.write(f"DETAILED PROMPT ANALYSIS\n")
+            f.write(f"{'=' * 70}\n\n")
+
+            for i, prompt_data in enumerate(volatility_data, 1):
+                if prompt_data.get('total_steps', 0) < 5:
+                    f.write(f"Prompt #{i}: {prompt_data['prompt_id']}\n")
+                    f.write(f"  Status: Insufficient data (only {prompt_data.get('total_steps', 0)} steps)\n\n")
+                    continue
+
+                f.write(f"Prompt #{i}: {prompt_data['prompt_id']}\n")
+                f.write(f"{'-' * 50}\n")
+                f.write(f"Total Steps: {prompt_data['total_steps']}\n\n")
+
+                # Baseline information
+                baseline = prompt_data.get('baseline', {})
+                f.write(f"Baseline (First 50% steps):\n")
+                f.write(f"  Steps: {baseline.get('segment_size', 0)}\n")
+                f.write(f"  STD: {baseline.get('std', 0):.3f}, MAD: {baseline.get('mad', 0):.3f}\n")
+                f.write(f"  CV: {baseline.get('cv', 0):.3f}, Range: {baseline.get('range', 0):.3f}\n\n")
+
+                # Segment analysis
+                segments_info = prompt_data.get('segments', {})
+                comparisons = prompt_data.get('comparisons', {})
+
+                for segment_name in ['last_20_percent', 'last_10_percent', 'last_5_percent', 'last_10_tokens', 'last_5_tokens']:
+                    if segment_name in segments_info and segment_name in comparisons:
+                        segment = segments_info[segment_name]
+                        comparison = comparisons[segment_name]
+
+                        f.write(f"{segment_name.replace('_', ' ').title()}:\n")
+                        f.write(f"  Steps: {segment.get('segment_size', 0)} ({segment.get('percentage_of_total', 0):.1f}% of total)\n")
+                        f.write(f"  STD: {segment.get('std', 0):.3f} (ratio: {comparison.get('std_ratio', 0):.2f})\n")
+                        f.write(f"  MAD: {segment.get('mad', 0):.3f} (ratio: {comparison.get('mad_ratio', 0):.2f})\n")
+                        f.write(f"  CV: {segment.get('cv', 0):.3f}, Range: {segment.get('range', 0):.3f}\n")
+                        f.write(f"  Volatility Level: {comparison.get('volatility_level', 'Unknown')}\n\n")
+
+                f.write(f"{'=' * 70}\n\n")
+
+        logger.info(f"Error tokens volatility analysis log saved: {log_path}")
+
+    except Exception as e:
+        logger.error(f"Failed to save volatility analysis log {log_path}: {e}")
 
 
 # --- Main Execution ---
@@ -1385,27 +1764,40 @@ if __name__ == "__main__":
                     error_tokens_output_dir = param_group_output_dir / "error_tokens_analysis"
                     error_tokens_output_dir.mkdir(parents=True, exist_ok=True)
                     
+                    # Create subdirectory for single error tokens plots
+                    error_tokens_single_output_dir = param_group_output_dir / "error_tokens_single"
+                    error_tokens_single_output_dir.mkdir(parents=True, exist_ok=True)
+                    
                     # Collect analysis data for this parameter group
                     param_group_analysis_data = []
                     error_tokens_analysis_data = []
-
+                    volatility_analysis_data = []
+                    
                     for prompt_id_str, list_of_steps in tqdm(prompts_data_dict.items(), desc=f"Prompts in {param_group_folder_name}", leave=False):
-                        # Generate evolution plot with tail table (existing functionality)
-                        plot_custom_error_ratio_evolution_for_prompt_annotated(
-                            prompt_id=prompt_id_str,
-                            step_data_list=list_of_steps,
-                            dec_params=current_params_dict,
-                            output_dir=param_group_output_dir
-                        )
-
-                        # Generate error tokens plots (new functionality)
-                        plot_absolute_and_error_tokens_for_prompt(
-                            prompt_id=prompt_id_str,
-                            step_data_list=list_of_steps,
-                            dec_params=current_params_dict,
-                            output_dir=error_tokens_output_dir
-                        )
-
+                        # # Generate evolution plot with tail table (existing functionality)
+                        # plot_custom_error_ratio_evolution_for_prompt_annotated(
+                        #     prompt_id=prompt_id_str,
+                        #     step_data_list=list_of_steps,
+                        #     dec_params=current_params_dict,
+                        #     output_dir=param_group_output_dir
+                        # )
+                        
+                        # # Generate error tokens plots (new functionality)
+                        # plot_absolute_and_error_tokens_for_prompt(
+                        #     prompt_id=prompt_id_str,
+                        #     step_data_list=list_of_steps,
+                        #     dec_params=current_params_dict,
+                        #     output_dir=error_tokens_output_dir
+                        # )
+                        
+                        # # Generate single error tokens plots (new functionality)
+                        # plot_error_tokens_single_for_prompt(
+                        #     prompt_id=prompt_id_str,
+                        #     step_data_list=list_of_steps,
+                        #     dec_params=current_params_dict,
+                        #     output_dir=error_tokens_single_output_dir
+                        # )
+                        
                         # Extract and collect analysis data for logging (existing functionality)
                         prompt_analysis = _log_prompt_analysis_data(
                             prompt_id=prompt_id_str,
@@ -1413,27 +1805,41 @@ if __name__ == "__main__":
                             dec_params=current_params_dict
                         )
                         param_group_analysis_data.append(prompt_analysis)
-
+                        
                         # Extract error tokens curve analysis (new functionality)
                         error_tokens_analysis = _analyze_error_tokens_curves_for_prompt(
                             prompt_id=prompt_id_str,
                             step_data_list=list_of_steps
                         )
                         error_tokens_analysis_data.append(error_tokens_analysis)
-                    
-                    # Save parameter group analysis log with zero-crossing analysis (existing functionality)
-                    _save_parameter_group_log(
-                        param_group_data=param_group_analysis_data,
-                        dec_params=current_params_dict,
-                        output_dir=param_group_output_dir,
-                        step_data_dict=prompts_data_dict
-                    )
 
-                    # Save error tokens curve analysis log (new functionality)
-                    _save_error_tokens_analysis_log(
-                        param_group_data=error_tokens_analysis_data,
+                        # Extract error tokens volatility analysis (new functionality)
+                        volatility_analysis = _analyze_error_tokens_volatility_for_prompt(
+                            prompt_id=prompt_id_str,
+                            step_data_list=list_of_steps
+                        )
+                        volatility_analysis_data.append(volatility_analysis)
+                    
+                    # # Save parameter group analysis log with zero-crossing analysis (existing functionality)
+                    # _save_parameter_group_log(
+                    #     param_group_data=param_group_analysis_data,
+                    #     dec_params=current_params_dict,
+                    #     output_dir=param_group_output_dir,
+                    #     step_data_dict=prompts_data_dict
+                    # )
+                    
+                    # # Save error tokens curve analysis log (new functionality)
+                    # _save_error_tokens_analysis_log(
+                    #     param_group_data=error_tokens_analysis_data,
+                    #     dec_params=current_params_dict,
+                    #     output_dir=error_tokens_output_dir
+                    # )
+
+                    # Save error tokens volatility analysis log (new functionality)
+                    _save_error_tokens_volatility_log(
+                        volatility_data=volatility_analysis_data,
                         dec_params=current_params_dict,
-                        output_dir=error_tokens_output_dir
+                        output_dir=error_tokens_single_output_dir
                     )
                 
                 logger.info("All annotated plotting complete.")
