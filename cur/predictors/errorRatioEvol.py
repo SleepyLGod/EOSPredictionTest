@@ -935,6 +935,236 @@ def _finalize_plot(ax, df_plot: pd.DataFrame):
     ax.grid(True, linestyle=':', alpha=0.7)
 
 
+def _prepare_error_tokens_data(step_data_list: list) -> pd.DataFrame:
+    """Prepare data for absolute error tokens and error tokens plots.
+    Returns:
+        DataFrame with columns: step_index, absolute_error_tokens, error_tokens
+    """
+    if not step_data_list:
+        return pd.DataFrame()
+    
+    df_steps = pd.DataFrame(step_data_list)
+    
+    if df_steps.empty:
+        return pd.DataFrame()
+    
+    # Calculate error tokens: actual_rest_len - predicted_rest_len
+    df_steps['error_tokens'] = df_steps['actual_rest_len'] - df_steps['predicted_rest_len']
+    
+    # Calculate absolute error tokens: |actual_rest_len - predicted_rest_len|
+    df_steps['absolute_error_tokens'] = df_steps['error_tokens'].abs()
+    
+    return df_steps
+
+
+def _fit_error_tokens_curve(ax, df_steps: pd.DataFrame, y_column: str, plot_title: str):
+    """Fit and plot linear and quadratic curves for error tokens data."""
+    if len(df_steps) < 3:
+        return
+    
+    x_data = df_steps['step_index'].values
+    y_data = df_steps[y_column].values
+    
+    try:
+        x_range = np.linspace(x_data.min(), x_data.max(), 100)
+        
+        # Linear fit
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+        linear_formula = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+        
+        # Plot linear fit
+        y_linear = linear_poly(x_range)
+        ax.plot(x_range, y_linear, '--', color='blue', linewidth=2,
+                label=f'Linear Fit (R²={linear_r2:.3f})', zorder=3)
+        
+        # Quadratic fit (if enough points)
+        if len(df_steps) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+            quad_formula = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
+            
+            # Plot quadratic fit
+            y_quad = quad_poly(x_range)
+            ax.plot(x_range, y_quad, '-.', color='purple', linewidth=2,
+                    label=f'Quadratic Fit (R²={quad_r2:.3f})', zorder=3)
+            
+            # Add formulas annotation
+            annotation_text = f"Linear: {linear_formula}\nR² = {linear_r2:.3f}\n\nQuadratic: {quad_formula}\nR² = {quad_r2:.3f}"
+        else:
+            annotation_text = f"Linear: {linear_formula}\nR² = {linear_r2:.3f}\n\n(Need ≥5 points for quadratic)"
+        
+        # Add formula annotation
+        ax.text(0.02, 0.98, annotation_text,
+                transform=ax.transAxes, fontsize=8, verticalalignment='top',
+                bbox=dict(boxstyle='round,pad=0.3', fc='lavender', alpha=0.8))
+    
+    except (np.linalg.LinAlgError, np.RankWarning) as e:
+        logger.warning(f"Error tokens curve fitting failed for {plot_title}: {e}")
+
+
+def _extract_error_tokens_curve_data(df_steps: pd.DataFrame, y_column: str) -> dict:
+    """Extract curve fitting data for error tokens without plotting.
+    Returns:
+        dict: Contains linear and quadratic fitting results
+    """
+    result = {
+        'can_fit': False,
+        'data_points_used': len(df_steps),
+        'linear_slope': None,
+        'linear_intercept': None,
+        'linear_r2': None,
+        'linear_formula': None,
+        'quadratic_a': None,
+        'quadratic_b': None,
+        'quadratic_c': None,
+        'quadratic_r2': None,
+        'quadratic_formula': None,
+        'best_fit_type': None,
+        'best_fit_r2': None
+    }
+
+    if len(df_steps) < 3:
+        return result
+
+    x_data = df_steps['step_index'].values
+    y_data = df_steps[y_column].values
+
+    try:
+        # Linear fit
+        linear_coeffs = np.polyfit(x_data, y_data, 1)
+        linear_poly = np.poly1d(linear_coeffs)
+        linear_r2 = np.corrcoef(y_data, linear_poly(x_data))[0, 1] ** 2
+
+        result['can_fit'] = True
+        result['linear_slope'] = linear_coeffs[0]
+        result['linear_intercept'] = linear_coeffs[1]
+        result['linear_r2'] = linear_r2
+        result['linear_formula'] = f"y = {linear_coeffs[0]:.4f}x + {linear_coeffs[1]:.4f}"
+        result['best_fit_type'] = 'linear'
+        result['best_fit_r2'] = linear_r2
+
+        # Quadratic fit (if enough points)
+        if len(df_steps) >= 5:
+            quad_coeffs = np.polyfit(x_data, y_data, 2)
+            quad_poly = np.poly1d(quad_coeffs)
+            quad_r2 = np.corrcoef(y_data, quad_poly(x_data))[0, 1] ** 2
+
+            result['quadratic_a'] = quad_coeffs[0]
+            result['quadratic_b'] = quad_coeffs[1]
+            result['quadratic_c'] = quad_coeffs[2]
+            result['quadratic_r2'] = quad_r2
+            result['quadratic_formula'] = f"y = {quad_coeffs[0]:.4f}x² + {quad_coeffs[1]:.4f}x + {quad_coeffs[2]:.4f}"
+
+            # Choose best fit based on R²
+            if quad_r2 > linear_r2:
+                result['best_fit_type'] = 'quadratic'
+                result['best_fit_r2'] = quad_r2
+
+    except (np.linalg.LinAlgError, np.RankWarning):
+        result['can_fit'] = False
+
+    return result
+
+
+def _set_optimal_y_limits(ax, y_data: pd.Series, padding_factor: float = 0.1):
+    """Set optimal Y-axis limits to ensure all data points are visible."""
+    if y_data.empty:
+        return
+
+    y_min = y_data.min()
+    y_max = y_data.max()
+    y_range = y_max - y_min
+
+    # Add padding
+    if y_range > 0:
+        padding = y_range * padding_factor
+    else:
+        padding = max(abs(y_min), abs(y_max)) * 0.1 if y_min != 0 or y_max != 0 else 1
+
+    ax.set_ylim(y_min - padding, y_max + padding)
+
+
+def plot_absolute_and_error_tokens_for_prompt(
+    prompt_id: str,
+    step_data_list: list,
+    dec_params: dict,
+    output_dir: Path
+):
+    """Plot absolute error tokens and error tokens evolution for a single prompt.
+    
+    Creates a dual-plot layout:
+    - Top plot: Absolute error tokens vs decoding step
+    - Bottom plot: Error tokens vs decoding step
+    Both plots include linear and quadratic fitting curves.
+    """
+    if not step_data_list:
+        logger.warning(f"No step data for prompt {prompt_id} with params {dec_params}. Skipping error tokens plot.")
+        return
+    
+    # Prepare data
+    df_error_tokens = _prepare_error_tokens_data(step_data_list)
+    
+    if df_error_tokens.empty:
+        logger.info(f"No valid error tokens data to plot for prompt {prompt_id}, params {dec_params}")
+        return
+    
+    # Create figure with two subplots (top and bottom)
+    fig, (ax_abs, ax_error) = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # Plot absolute error tokens (top subplot)
+    sns.lineplot(data=df_error_tokens, x='step_index', y='absolute_error_tokens',
+                marker='o', markersize=4, ax=ax_abs, color='darkred',
+                label="Absolute Error Tokens", zorder=2)
+    
+    # Fit curves for absolute error tokens
+    _fit_error_tokens_curve(ax_abs, df_error_tokens, 'absolute_error_tokens', 'Absolute Error Tokens')
+    
+    # Set labels and title for absolute error tokens plot
+    param_str_title = ", ".join([f"{k.replace('temperature','T').replace('repetition_penalty','RP')}={v}"
+                                for k,v in sorted(dec_params.items())])
+    ax_abs.set_title(f"Absolute Error Tokens Evolution for Prompt: {prompt_id}\nParams: {param_str_title}", fontsize=12)
+    ax_abs.set_xlabel("Decoding Step Index", fontsize=10)
+    ax_abs.set_ylabel("Absolute Error Tokens", fontsize=10)
+    ax_abs.legend(loc='upper right', ncol=2)
+    ax_abs.grid(True, linestyle=':', alpha=0.7)
+    
+    # Set optimal Y limits for absolute error tokens
+    _set_optimal_y_limits(ax_abs, df_error_tokens['absolute_error_tokens'])
+    
+    # Plot error tokens (bottom subplot)
+    sns.lineplot(data=df_error_tokens, x='step_index', y='error_tokens',
+                marker='o', markersize=4, ax=ax_error, color='darkblue',
+                label="Error Tokens", zorder=2)
+    
+    # Add zero line for reference
+    ax_error.axhline(0.0, color='red', linestyle='--', linewidth=1.5, label='Zero Line', zorder=1)
+    
+    # Fit curves for error tokens
+    _fit_error_tokens_curve(ax_error, df_error_tokens, 'error_tokens', 'Error Tokens')
+    
+    # Set labels and title for error tokens plot
+    ax_error.set_title(f"Error Tokens Evolution for Prompt: {prompt_id}", fontsize=12)
+    ax_error.set_xlabel("Decoding Step Index", fontsize=10)
+    ax_error.set_ylabel("Error Tokens (Actual - Predicted)", fontsize=10)
+    ax_error.legend(loc='upper right', ncol=2)
+    ax_error.grid(True, linestyle=':', alpha=0.7)
+    
+    # Set optimal Y limits for error tokens
+    _set_optimal_y_limits(ax_error, df_error_tokens['error_tokens'])
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save plot
+    prompt_filename_safe = sanitize_filename(prompt_id)
+    plot_filename = f"prompt_{prompt_filename_safe}_error_tokens.png"
+    full_plot_path = output_dir / plot_filename
+    save_plot_to_file(fig, full_plot_path)
+
+
 def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
     prompt_id: str,
     step_data_list: list,
@@ -992,6 +1222,137 @@ def plot_custom_error_ratio_evolution_for_prompt_annotated( # Renamed function
     save_plot_to_file(fig, full_plot_path)
 
 
+def _analyze_error_tokens_curves_for_prompt(prompt_id: str, step_data_list: list) -> dict:
+    """Analyze error tokens curve fitting for a single prompt.
+    Returns:
+        dict: Analysis results for both absolute and real error tokens
+    """
+    result = {
+        'prompt_id': prompt_id,
+        'total_data_points': len(step_data_list),
+        'absolute_error_analysis': {},
+        'real_error_analysis': {}
+    }
+
+    if not step_data_list:
+        return result
+
+    # Prepare data
+    df_error_tokens = _prepare_error_tokens_data(step_data_list)
+
+    if df_error_tokens.empty:
+        return result
+
+    # Analyze absolute error tokens
+    abs_analysis = _extract_error_tokens_curve_data(df_error_tokens, 'absolute_error_tokens')
+    result['absolute_error_analysis'] = abs_analysis
+
+    # Analyze real error tokens
+    real_analysis = _extract_error_tokens_curve_data(df_error_tokens, 'error_tokens')
+    result['real_error_analysis'] = real_analysis
+
+    return result
+
+
+def _save_error_tokens_analysis_log(param_group_data: list, dec_params: dict, output_dir: Path):
+    """Save error tokens curve analysis log for a parameter group.
+    Args:
+        param_group_data: List of error tokens analysis data for all prompts
+        dec_params: Decoding parameters for this group
+        output_dir: Output directory for the error tokens analysis
+    """
+    if not param_group_data:
+        logger.warning("No error tokens analysis data to save")
+        return
+
+    # Create log filename
+    log_filename = "error_tokens_curve_analysis_log.txt"
+    log_path = output_dir / log_filename
+
+    try:
+        # Calculate statistics
+        total_prompts = len(param_group_data)
+
+        # Absolute error tokens statistics
+        abs_can_fit = [p for p in param_group_data if p['absolute_error_analysis'].get('can_fit', False)]
+        abs_fit_ratio = len(abs_can_fit) / total_prompts if total_prompts > 0 else 0
+
+        abs_declining_slopes = [p for p in abs_can_fit if p['absolute_error_analysis'].get('linear_slope', 0) < 0]
+        abs_rising_slopes = [p for p in abs_can_fit if p['absolute_error_analysis'].get('linear_slope', 0) > 0]
+
+        # Real error tokens statistics
+        real_can_fit = [p for p in param_group_data if p['real_error_analysis'].get('can_fit', False)]
+        real_fit_ratio = len(real_can_fit) / total_prompts if total_prompts > 0 else 0
+
+        real_negative_slopes = [p for p in real_can_fit if p['real_error_analysis'].get('linear_slope', 0) < 0]
+
+        with open(log_path, 'w', encoding='utf-8') as f:
+            # Write header
+            param_str = ", ".join([f"{k}={v}" for k, v in sorted(dec_params.items())])
+            f.write(f"Error Tokens Curve Analysis Log\n")
+            f.write(f"{'=' * 60}\n")
+            f.write(f"Parameter Group: {param_str}\n")
+            f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Prompts: {total_prompts}\n")
+            f.write(f"{'=' * 60}\n\n")
+
+            # Overall statistics
+            f.write(f"OVERALL FITTING STATISTICS\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"Prompts with fittable absolute error curves: {len(abs_can_fit)} ({abs_fit_ratio:.1%})\n")
+            f.write(f"Prompts with fittable real error curves: {len(real_can_fit)} ({real_fit_ratio:.1%})\n\n")
+
+            # Absolute error tokens analysis
+            f.write(f"ABSOLUTE ERROR TOKENS ANALYSIS\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"Total fittable prompts: {len(abs_can_fit)}\n")
+            f.write(f"Declining slopes (negative): {len(abs_declining_slopes)} ({len(abs_declining_slopes)/len(abs_can_fit)*100:.1f}% of fittable)\n")
+            f.write(f"Rising slopes (positive): {len(abs_rising_slopes)} ({len(abs_rising_slopes)/len(abs_can_fit)*100:.1f}% of fittable)\n\n")
+
+            if abs_declining_slopes:
+                f.write(f"Declining Absolute Error Slopes:\n")
+                f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Decline Rate':<15}\n")
+                f.write(f"{'-' * 70}\n")
+                for p in abs_declining_slopes:
+                    slope = p['absolute_error_analysis']['linear_slope']
+                    r2 = p['absolute_error_analysis']['linear_r2']
+                    decline_rate = abs(slope)  # Magnitude of decline
+                    f.write(f"{p['prompt_id']:<30} {slope:<12.4f} {r2:<8.3f} {decline_rate:<15.4f}\n")
+                f.write(f"\n")
+
+            if abs_rising_slopes:
+                f.write(f"Rising Absolute Error Slopes:\n")
+                f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Rise Rate':<15}\n")
+                f.write(f"{'-' * 70}\n")
+                for p in abs_rising_slopes:
+                    slope = p['absolute_error_analysis']['linear_slope']
+                    r2 = p['absolute_error_analysis']['linear_r2']
+                    rise_rate = slope  # Magnitude of rise
+                    f.write(f"{p['prompt_id']:<30} {slope:<12.4f} {r2:<8.3f} {rise_rate:<15.4f}\n")
+                f.write(f"\n")
+            
+            # Real error tokens analysis
+            f.write(f"REAL ERROR TOKENS ANALYSIS\n")
+            f.write(f"{'-' * 40}\n")
+            f.write(f"Total fittable prompts: {len(real_can_fit)}\n")
+            f.write(f"Negative slopes: {len(real_negative_slopes)} ({len(real_negative_slopes)/len(real_can_fit)*100:.1f}% of fittable)\n\n")
+
+            if real_negative_slopes:
+                f.write(f"Negative Real Error Slopes:\n")
+                f.write(f"{'Prompt ID':<30} {'Slope':<12} {'R²':<8} {'Slope Value':<15}\n")
+                f.write(f"{'-' * 70}\n")
+                for p in real_negative_slopes:
+                    slope = p['real_error_analysis']['linear_slope']
+                    r2 = p['real_error_analysis']['linear_r2']
+                    f.write(f"{p['prompt_id']:<30} {slope:<12.4f} {r2:<8.3f} {slope:<15.4f}\n")
+                f.write(f"\n")
+
+        logger.info(f"Error tokens curve analysis log saved: {log_path}")
+
+    except Exception as e:
+        logger.error(f"Failed to save error tokens analysis log {log_path}: {e}")
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     for input_file, base_output_dir in zip(INPUT_EVAL_JSONL_FILE_LIST, BASE_OUTPUT_DIR_LIST): 
@@ -1020,9 +1381,14 @@ if __name__ == "__main__":
                     
                     # logger.info(f"Processing parameter group: {current_params_dict} -> saving in {param_group_output_dir}") # Too verbose for many groups
                     
+                    # Create subdirectory for error tokens plots
+                    error_tokens_output_dir = param_group_output_dir / "error_tokens_analysis"
+                    error_tokens_output_dir.mkdir(parents=True, exist_ok=True)
+                    
                     # Collect analysis data for this parameter group
                     param_group_analysis_data = []
-                    
+                    error_tokens_analysis_data = []
+
                     for prompt_id_str, list_of_steps in tqdm(prompts_data_dict.items(), desc=f"Prompts in {param_group_folder_name}", leave=False):
                         # Generate evolution plot with tail table (existing functionality)
                         plot_custom_error_ratio_evolution_for_prompt_annotated(
@@ -1031,21 +1397,43 @@ if __name__ == "__main__":
                             dec_params=current_params_dict,
                             output_dir=param_group_output_dir
                         )
-                        
-                        # Extract and collect analysis data for logging (new functionality)
+
+                        # Generate error tokens plots (new functionality)
+                        plot_absolute_and_error_tokens_for_prompt(
+                            prompt_id=prompt_id_str,
+                            step_data_list=list_of_steps,
+                            dec_params=current_params_dict,
+                            output_dir=error_tokens_output_dir
+                        )
+
+                        # Extract and collect analysis data for logging (existing functionality)
                         prompt_analysis = _log_prompt_analysis_data(
                             prompt_id=prompt_id_str,
                             step_data_list=list_of_steps,
                             dec_params=current_params_dict
                         )
                         param_group_analysis_data.append(prompt_analysis)
+
+                        # Extract error tokens curve analysis (new functionality)
+                        error_tokens_analysis = _analyze_error_tokens_curves_for_prompt(
+                            prompt_id=prompt_id_str,
+                            step_data_list=list_of_steps
+                        )
+                        error_tokens_analysis_data.append(error_tokens_analysis)
                     
-                    # Save parameter group analysis log with zero-crossing analysis (new functionality)
+                    # Save parameter group analysis log with zero-crossing analysis (existing functionality)
                     _save_parameter_group_log(
                         param_group_data=param_group_analysis_data,
                         dec_params=current_params_dict,
                         output_dir=param_group_output_dir,
                         step_data_dict=prompts_data_dict
+                    )
+
+                    # Save error tokens curve analysis log (new functionality)
+                    _save_error_tokens_analysis_log(
+                        param_group_data=error_tokens_analysis_data,
+                        dec_params=current_params_dict,
+                        output_dir=error_tokens_output_dir
                     )
                 
                 logger.info("All annotated plotting complete.")
